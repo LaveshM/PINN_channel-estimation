@@ -5,6 +5,7 @@ from scipy.interpolate import interp1d
 from scipy.linalg import dft
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+from scipy.linalg import dft
 
 class LSOFDMChannelEstimator:
     """

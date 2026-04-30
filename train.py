@@ -15,18 +15,19 @@ def main_train(config, continue_= None):
         bs_real_coords=config['bs_real_coords'],
         image_width_meters=config['image_width_meters']
     )
-    
+    print("outside rss")
     # Create datasets
     train_dataset, val_dataset, test_dataset = create_datasets(config['smomp_file'], config['accurate_file'], 
         config['user_positions_file'], rss_processor)
     
+    print("outside load")
     train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], 
                              shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], 
                            shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=config['batch_size'], 
                             shuffle=False)
-    
+    print("outside load")
     # Initialize model
     #model = ImprovedPhysicsInformedUNet(channel_shape=(32, 4, 576))
     model = ImprovedPhysicsInformedUNet(channel_shape=(32, 4, 576))
@@ -83,9 +84,15 @@ def main_train(config, continue_= None):
 if __name__ == "__main__":
     # Configuration
     config = {
+<<<<<<< HEAD
         'smomp_file': 'initial_estimate_ls_snr0.npy',
         'accurate_file': '3D_channel_15GHz_2x2_Pt50.npy',
         'user_positions_file': 'ue_positions_noisy.txt',
+=======
+        'smomp_file': 'Dataset/initial_estimate_ls_snr0.npy',
+        'accurate_file': 'Dataset/3D_channel_15GHz_2x2_Pt50.npy',
+        'user_positions_file': 'Dataset/ue_positions_noisy.txt',
+>>>>>>> d944406 (init)
         'rss_image_path': 'Dataset/50_15GHz.jpg',
         'bs_pixel_coords': (287, 293),
         'bs_real_coords': (71.06, 246.29),
@@ -94,7 +101,7 @@ if __name__ == "__main__":
         'epochs': 500,
         'learning_rate': 1e-3,
         'device': 'cuda',
-        'name_val':'simple_ls_0_val.pth',
-        'name_train':'simple_ls_0_train.pth'
+        'name_val':'simple_ls_0_val_locsplit.pth',
+        'name_train':'simple_ls_0_train_locsplit.pth'
     }
     model = main_train(config)

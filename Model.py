@@ -713,36 +713,39 @@ class GlobalNormalizedDataset(Dataset):
     """Dataset with global normalization applied before train/test split"""
     
     def __init__(self, smomp_file, accurate_file, user_positions_file, 
-                 rss_processor, crop_size=30, split='train', 
+                 rss_processor, normalization_params, crop_size=30, split='train', 
                  train_ratio=0.7, val_ratio=0.15, random_seed=42, use_dbm_values=True):
         
         # Set random seed for reproducible splits
         np.random.seed(random_seed)
         
-        # Load ALL data first
-        self.smomp_channels = np.load(smomp_file)
-        self.accurate_channels = np.load(accurate_file)
+        # # Load ALL data first
+        # self.smomp_channels = np.load(smomp_file)
+        # self.accurate_channels = np.load(accurate_file)
         
-        # Convert complex to real and imaginary parts
-        self.smomp_channels_real = np.concatenate([
-            np.real(self.smomp_channels),
-            np.imag(self.smomp_channels)
-        ], axis=1)
+        # # Convert complex to real and imaginary parts
+        # self.smomp_channels_real = np.concatenate([
+        #     np.real(self.smomp_channels),
+        #     np.imag(self.smomp_channels)
+        # ], axis=1)
         
-        self.accurate_channels_real = np.concatenate([
-            np.real(self.accurate_channels),
-            np.imag(self.accurate_channels)
-        ], axis=1)
+        # self.accurate_channels_real = np.concatenate([
+        #     np.real(self.accurate_channels),
+        #     np.imag(self.accurate_channels)
+        # ], axis=1)
         
-        # GLOBAL NORMALIZATION - relative to max across ALL data
-        self.smomp_max = np.max(np.abs(self.smomp_channels_real))
-        self.accurate_max = np.max(np.abs(self.accurate_channels_real))
-        # print(self.smomp_max)
-        # print(self.accurate_max)
-        # Normalize ALL data using global parameters
-        self.smomp_channels_normalized = self.smomp_channels_real / max(self.smomp_max, self.accurate_max)
-        self.accurate_channels_normalized = self.accurate_channels_real / max(self.smomp_max, self.accurate_max)
+        # # GLOBAL NORMALIZATION - relative to max across ALL data
+        # self.smomp_max = np.max(np.abs(self.smomp_channels_real))
+        # self.accurate_max = np.max(np.abs(self.accurate_channels_real))
+        # # print(self.smomp_max)
+        # # print(self.accurate_max)
+        # # Normalize ALL data using global parameters
+        # self.smomp_channels_normalized = self.smomp_channels_real / max(self.smomp_max, self.accurate_max)
+        # self.accurate_channels_normalized = self.accurate_channels_real / max(self.smomp_max, self.accurate_max)
         
+        self.smomp_channels_normalized = smomp_file        # parameter is now an array
+        self.accurate_channels_normalized = accurate_file  # parameter is now an array
+
         # Load user positions
         self.user_positions = []
         with open(user_positions_file, 'r') as f:
@@ -766,7 +769,36 @@ class GlobalNormalizedDataset(Dataset):
         
         n_train = int(n_samples * train_ratio)
         n_val = int(n_samples * val_ratio)
+
+        # train_mask = np.array([pos[1] > 100 for pos in self.user_positions])
+        # train_indices = np.where(train_mask)[0]
+        # remaining_indices = np.where(~train_mask)[0]
+
+        # n_remaining = len(remaining_indices)
+
+
+        # n_val = n_remaining // 2
+
+        # val_indices = remaining_indices[:n_val]
+        # test_indices = remaining_indices[n_val:]
+
+        # test_indices = np.arange(989)
+        # val_indices = np.arange(989, 989+987)
+        # train_indices = np.arange(989+987, 9877)
+
+        # val = df.iloc[val_indices]
+        # test = df.iloc[test_indices]
         
+
+        # if split == 'train':
+        #     self.indices = train_indices
+        # elif split == 'val':
+        #     self.indices = val_indices
+        # elif split == 'test':
+        #     self.indices = test_indices
+        # else:
+        #     raise ValueError(f"Invalid split: {split}. Use 'train', 'val', or 'test'")
+
         if split == 'train':
             self.indices = indices[:n_train]
         elif split == 'val':
@@ -779,10 +811,11 @@ class GlobalNormalizedDataset(Dataset):
         print(f"Split '{split}': {len(self.indices)} samples")
         
         # Store normalization parameters for later use
-        self.normalization_params = {
-            'smomp_max': self.smomp_max,
-            'accurate_max': self.accurate_max
-        }
+        # self.normalization_params = {
+        #     'smomp_max': self.smomp_max,
+        #     'accurate_max': self.accurate_max
+        # }
+        self.normalization_params = normalization_params
     
     def get_normalization_params(self):
         """Get normalization parameters for saving"""
@@ -840,34 +873,79 @@ class GlobalNormalizedDataset(Dataset):
         
         return smomp_tensor, accurate_tensor, rss_tensor
 
-
-# Usage example:
 def create_datasets(smomp_file, accurate_file, user_positions_file, rss_processor, use_dbm_values=True):
-    """Create train, validation, and test datasets with consistent normalization"""
     
-    # Create train dataset (this computes global normalization)
+    # Load once
+    print("Loading data...")
+    smomp_channels = np.load(smomp_file)
+    accurate_channels = np.load(accurate_file)
+    print("Loaded.")
+
+    # Convert complex to real/imag
+    smomp_channels_real = np.concatenate([np.real(smomp_channels), np.imag(smomp_channels)], axis=1)
+    accurate_channels_real = np.concatenate([np.real(accurate_channels), np.imag(accurate_channels)], axis=1)
+
+    # Normalize once
+    smomp_max = np.max(np.abs(smomp_channels_real))
+    accurate_max = np.max(np.abs(accurate_channels_real))
+    global_max = max(smomp_max, accurate_max)
+    smomp_channels_real /= global_max
+    accurate_channels_real /=  global_max
+
+    normalization_params = {
+            'smomp_max': smomp_max,
+            'accurate_max': accurate_max
+        }
+
+    del smomp_channels
+    del accurate_channels
+
+    # Pass arrays to each split
     train_dataset = GlobalNormalizedDataset(
-        smomp_file, accurate_file, user_positions_file, rss_processor,
+        smomp_channels_real, accurate_channels_real, user_positions_file, rss_processor,
+        normalization_params,
         split='train', train_ratio=0.8, val_ratio=0.1, use_dbm_values=use_dbm_values
     )
-    
-    # Get normalization params
-    norm_params = train_dataset.get_normalization_params()
-    print(f"Using normalization params: {norm_params}")
-    
-    # Create val and test datasets with same parameters
-    # (they will use the same global normalization computed in train dataset)
     val_dataset = GlobalNormalizedDataset(
-        smomp_file, accurate_file, user_positions_file, rss_processor,
+        smomp_channels_real, accurate_channels_real, user_positions_file, rss_processor,
+        normalization_params,
         split='val', train_ratio=0.8, val_ratio=0.1, use_dbm_values=use_dbm_values
     )
-    
     test_dataset = GlobalNormalizedDataset(
-        smomp_file, accurate_file, user_positions_file, rss_processor,
+        smomp_channels_real, accurate_channels_real, user_positions_file, rss_processor,
+        normalization_params,
         split='test', train_ratio=0.8, val_ratio=0.1, use_dbm_values=use_dbm_values
     )
-    
+
     return train_dataset, val_dataset, test_dataset
+
+# Usage example:
+# def create_datasets(smomp_file, accurate_file, user_positions_file, rss_processor, use_dbm_values=False):
+#     """Create train, validation, and test datasets with consistent normalization"""
+    
+#     # Create train dataset (this computes global normalization)
+#     train_dataset = GlobalNormalizedDataset(
+#         smomp_file, accurate_file, user_positions_file, rss_processor,
+#         split='train', train_ratio=0.8, val_ratio=0.1, use_dbm_values=use_dbm_values
+#     )
+    
+#     # Get normalization params
+#     norm_params = train_dataset.get_normalization_params()
+#     print(f"Using normalization params: {norm_params}")
+    
+#     # Create val and test datasets with same parameters
+#     # (they will use the same global normalization computed in train dataset)
+#     val_dataset = GlobalNormalizedDataset(
+#         smomp_file, accurate_file, user_positions_file, rss_processor,
+#         split='val', train_ratio=0.8, val_ratio=0.1, use_dbm_values=use_dbm_values
+#     )
+    
+#     test_dataset = GlobalNormalizedDataset(
+#         smomp_file, accurate_file, user_positions_file, rss_processor,
+#         split='test', train_ratio=0.8, val_ratio=0.1, use_dbm_values=use_dbm_values
+#     )
+    
+#     return train_dataset, val_dataset, test_dataset
 
 
 

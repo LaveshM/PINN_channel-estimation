@@ -8,6 +8,7 @@ from tqdm import tqdm
 import os
 from copy import deepcopy
 import random
+from Model import *
 
 # Import modules
 
@@ -50,25 +51,28 @@ class TransferLearningExperiment:
             image_width_meters=self.config_8ghz['image_width_meters']
         )
         
-        self.train_dataset_8ghz = GlobalNormalizedDataset(
-            self.config_8ghz['smomp_file'],
-            self.config_8ghz['accurate_file'],
-            self.config_8ghz['user_positions_file'],
-            self.rss_processor_8ghz,
-            split='train',
-            train_ratio=0.7,
-            val_ratio=0.3
-        )
+        # self.train_dataset_8ghz = GlobalNormalizedDataset(
+        #     self.config_8ghz['smomp_file'],
+        #     self.config_8ghz['accurate_file'],
+        #     self.config_8ghz['user_positions_file'],
+        #     self.rss_processor_8ghz,
+        #     split='train',
+        #     train_ratio=0.7,
+        #     val_ratio=0.3
+        # )
         
-        self.val_dataset_8ghz = GlobalNormalizedDataset(
-            self.config_8ghz['smomp_file'],
-            self.config_8ghz['accurate_file'],
-            self.config_8ghz['user_positions_file'],
-            self.rss_processor_8ghz,
-            split='val',
-            train_ratio=0.7,
-            val_ratio=0.3
-        )
+        # self.val_dataset_8ghz = GlobalNormalizedDataset(
+        #     self.config_8ghz['smomp_file'],
+        #     self.config_8ghz['accurate_file'],
+        #     self.config_8ghz['user_positions_file'],
+        #     self.rss_processor_8ghz,
+        #     split='val',
+        #     train_ratio=0.7,
+        #     val_ratio=0.3
+        # )
+
+        self.train_dataset_8ghz, self.val_dataset_8ghz, _ = create_datasets(self.config_8ghz['smomp_file'], self.config_8ghz['accurate_file'], 
+        self.config_8ghz['user_positions_file'], self.rss_processor_8ghz)
         
         print(f"8 GHz dataset sizes - Train: {len(self.train_dataset_8ghz)}, "
               f"Val: {len(self.val_dataset_8ghz)}")
