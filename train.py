@@ -1,6 +1,15 @@
+import numpy as np
+np.random.seed(42)
+
 from Model import *
 
 def main_train(config, continue_= None):
+    
+    config['name_train'] = 'saved/' + config['split_type'] + '_' + str(config['user_noise']) + '/' + os.path.basename(config['name_train'])
+    config['name_val'] = 'saved/' + config['split_type'] + '_' + str(config['user_noise']) + '/' + os.path.basename(config['name_val'])
+
+    os.makedirs(os.path.dirname(config['name_val']), exist_ok=True)
+
     # Check if files exist
     for file_key in ['smomp_file', 'accurate_file', 'user_positions_file', 'rss_image_path']:
         if not os.path.exists(config[file_key]):
@@ -18,7 +27,7 @@ def main_train(config, continue_= None):
     print("outside rss")
     # Create datasets
     train_dataset, val_dataset, test_dataset = create_datasets(config['smomp_file'], config['accurate_file'], 
-        config['user_positions_file'], rss_processor)
+        config['user_positions_file'], config['split_type'], config['user_noise'], rss_processor)
     
     print("outside load")
     train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], 
@@ -59,25 +68,35 @@ def main_train(config, continue_= None):
     print(f"\nFinal Test NMSE: {test_nmse:.6f}")
     print(f"Test NMSE in dB: {10 * np.log10(test_nmse):.2f} dB")
     
+    print("\nEvaluating on train set on best val...")
+    model.load_state_dict(torch.load(config['name_val']))
+    train_nmse = evaluate_test_set(model, train_loader, device=config['device'])
+    
+    print(f"\nFinal Train NMSE: {train_nmse:.6f}")
+    print(f"Test NMSE in dB: {10 * np.log10(train_nmse):.2f} dB")
+    
     # Plot training curves
-    # plt.figure(figsize=(10, 5))
-    # plt.subplot(1, 2, 1)
-    # plt.plot(train_losses, label='Train Loss')
-    # plt.plot(val_losses, label='Val Loss')
-    # plt.xlabel('Epoch')
-    # plt.ylabel('Loss')
-    # plt.legend()
-    # plt.title('Training and Validation Loss')
+    plt.figure(figsize=(10, 5))
+    plt.subplot(1, 2, 1)
+    plt.plot(train_losses, label='Train Loss')
+    plt.plot(val_losses, label='Val Loss')
+    # log scale for better visibility
+    plt.yscale('log')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.title('Training and Validation Loss')
     
-    # plt.subplot(1, 2, 2)
-    # plt.plot(val_losses)
-    # plt.xlabel('Epoch')
-    # plt.ylabel('Validation Loss')
-    # plt.title('Validation Loss')
+    plt.subplot(1, 2, 2)
+    plt.plot(val_losses)
+    plt.yscale('log')
+    plt.xlabel('Epoch')
+    plt.ylabel('Validation Loss')
+    plt.title('Validation Loss')
     
-    # plt.tight_layout()
-    # plt.savefig('training_curves.png')
-    # plt.show()
+    plt.tight_layout()
+    plt.savefig('saved/' + config['split_type'] + '_' + str(config['user_noise']) + '/' + 'training_curves.png')
+    plt.show()
 
     return model, val_loader, test_loader
 
@@ -101,7 +120,9 @@ if __name__ == "__main__":
         'epochs': 500,
         'learning_rate': 1e-3,
         'device': 'cuda',
-        'name_val':'simple_ls_0_val_locsplit.pth',
-        'name_train':'simple_ls_0_train_locsplit.pth'
+        'name_val':'simple_ls_0_val.pth',
+        'name_train':'simple_ls_0_train.pth',
+        'split_type': 'loc',
+        'user_noise': 1 # mention standard deviation
     }
-    model = main_train(config)
+    model = main_train(config, continue_=True)

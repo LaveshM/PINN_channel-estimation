@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+np.random.seed(42)
 from torch.utils.data import Dataset, DataLoader
 import cv2
 from PIL import Image
@@ -669,7 +670,7 @@ def train_model(model, train_loader, val_loader, epochs=100, lr=1e-3, device='cu
         if avg_val_nmse < best_val_nmse:
             best_val_nmse = avg_val_nmse
             torch.save(model.state_dict(), model_name_val)
-            print(f'Saved best model with Val NMSE={avg_val_nmse:.4f}')
+            print(f'Saved best model with Val NMSE={avg_val_nmse:.4f} at {model_name_val}')
 
     print('Last trained model saved')
     return train_losses, val_losses
@@ -713,36 +714,12 @@ class GlobalNormalizedDataset(Dataset):
     """Dataset with global normalization applied before train/test split"""
     
     def __init__(self, smomp_file, accurate_file, user_positions_file, 
-                 rss_processor, normalization_params, crop_size=30, split='train', 
+                 rss_processor, normalization_params, indices, user_noise, crop_size=30, split='train', 
                  train_ratio=0.7, val_ratio=0.15, random_seed=42, use_dbm_values=True):
         
         # Set random seed for reproducible splits
         np.random.seed(random_seed)
-        
-        # # Load ALL data first
-        # self.smomp_channels = np.load(smomp_file)
-        # self.accurate_channels = np.load(accurate_file)
-        
-        # # Convert complex to real and imaginary parts
-        # self.smomp_channels_real = np.concatenate([
-        #     np.real(self.smomp_channels),
-        #     np.imag(self.smomp_channels)
-        # ], axis=1)
-        
-        # self.accurate_channels_real = np.concatenate([
-        #     np.real(self.accurate_channels),
-        #     np.imag(self.accurate_channels)
-        # ], axis=1)
-        
-        # # GLOBAL NORMALIZATION - relative to max across ALL data
-        # self.smomp_max = np.max(np.abs(self.smomp_channels_real))
-        # self.accurate_max = np.max(np.abs(self.accurate_channels_real))
-        # # print(self.smomp_max)
-        # # print(self.accurate_max)
-        # # Normalize ALL data using global parameters
-        # self.smomp_channels_normalized = self.smomp_channels_real / max(self.smomp_max, self.accurate_max)
-        # self.accurate_channels_normalized = self.accurate_channels_real / max(self.smomp_max, self.accurate_max)
-        
+                
         self.smomp_channels_normalized = smomp_file        # parameter is now an array
         self.accurate_channels_normalized = accurate_file  # parameter is now an array
 
@@ -758,55 +735,12 @@ class GlobalNormalizedDataset(Dataset):
         self.rss_processor = rss_processor
         self.crop_size = crop_size
         self.use_dbm_values = use_dbm_values
-        
+        self.user_noise = user_noise
+
         # Initialize RSS color mapper
         self.rss_color_mapper = RSSColorMapper(min_dbm=-110.0, max_dbm=-40.0)
         
-        # Create random splits AFTER normalization
-        n_samples = len(self.smomp_channels_normalized)
-        np.random.seed(42)
-        indices = np.random.permutation(n_samples)
-        
-        n_train = int(n_samples * train_ratio)
-        n_val = int(n_samples * val_ratio)
-
-        # train_mask = np.array([pos[1] > 100 for pos in self.user_positions])
-        # train_indices = np.where(train_mask)[0]
-        # remaining_indices = np.where(~train_mask)[0]
-
-        # n_remaining = len(remaining_indices)
-
-
-        # n_val = n_remaining // 2
-
-        # val_indices = remaining_indices[:n_val]
-        # test_indices = remaining_indices[n_val:]
-
-        # test_indices = np.arange(989)
-        # val_indices = np.arange(989, 989+987)
-        # train_indices = np.arange(989+987, 9877)
-
-        # val = df.iloc[val_indices]
-        # test = df.iloc[test_indices]
-        
-
-        # if split == 'train':
-        #     self.indices = train_indices
-        # elif split == 'val':
-        #     self.indices = val_indices
-        # elif split == 'test':
-        #     self.indices = test_indices
-        # else:
-        #     raise ValueError(f"Invalid split: {split}. Use 'train', 'val', or 'test'")
-
-        if split == 'train':
-            self.indices = indices[:n_train]
-        elif split == 'val':
-            self.indices = indices[n_train:n_train + n_val]
-        elif split == 'test':
-            self.indices = indices[n_train + n_val:]
-        else:
-            raise ValueError(f"Invalid split: {split}. Use 'train', 'val', or 'test'")
+        self.indices = indices
         
         print(f"Split '{split}': {len(self.indices)} samples")
         
@@ -840,8 +774,13 @@ class GlobalNormalizedDataset(Dataset):
         accurate_channel = self.accurate_channels_normalized[real_idx]
         
         # Get RSS map
-        user_idx = real_idx % len(self.user_positions)
+        user_idx = real_idx #% len(self.user_positions)
         user_x, user_y = self.user_positions[user_idx]
+        
+        # add noise to the location
+        user_x += np.random.normal(0, self.user_noise)
+        user_y += np.random.normal(0, self.user_noise)
+        
         rss_crop = self.rss_processor.crop_around_user(user_x, user_y, self.crop_size)
         
         if rss_crop is None:
@@ -867,13 +806,8 @@ class GlobalNormalizedDataset(Dataset):
             rss_normalized = rss_gray.astype(np.float32) / 255.0
             rss_tensor = torch.from_numpy(rss_normalized).unsqueeze(0).float()
         
-        # Convert to tensors
-        smomp_tensor = torch.from_numpy(smomp_channel).float()
-        accurate_tensor = torch.from_numpy(accurate_channel).float()
-        
-        return smomp_tensor, accurate_tensor, rss_tensor
-
-def create_datasets(smomp_file, accurate_file, user_positions_file, rss_processor, use_dbm_values=True):
+        return smomp_channel, accurate_channel, rss_tensor
+def create_datasets(smomp_file, accurate_file, user_positions_file, split_type, user_noise, rss_processor, use_dbm_values=True):
     
     # Load once
     print("Loading data...")
@@ -885,9 +819,58 @@ def create_datasets(smomp_file, accurate_file, user_positions_file, rss_processo
     smomp_channels_real = np.concatenate([np.real(smomp_channels), np.imag(smomp_channels)], axis=1)
     accurate_channels_real = np.concatenate([np.real(accurate_channels), np.imag(accurate_channels)], axis=1)
 
-    # Normalize once
-    smomp_max = np.max(np.abs(smomp_channels_real))
-    accurate_max = np.max(np.abs(accurate_channels_real))
+    train_ratio = 0.8
+    val_ratio = 0.1
+    n_samples = len(smomp_channels_real)
+  
+    # user_positions = []
+    # with open(user_positions_file, 'r') as f:
+    #     lines = f.readlines()
+    #     for line in lines[1:]:
+    #         if line.strip():
+    #             x, y, z = map(float, line.strip().split())
+    #             user_positions.append((x, y))
+    
+    if split_type== "random":
+        indices = np.random.permutation(n_samples)
+    
+        n_train = int(n_samples * train_ratio)
+        n_val = int(n_samples * val_ratio)
+        
+        train_indices = indices[:n_train]
+        val_indices = indices[n_train:n_train + n_val]
+        test_indices = indices[n_train + n_val:]
+    elif split_type == "loc":
+        test_indices = np.arange(989)
+        val_indices = np.arange(989, 989+987)
+        train_indices = np.arange(989+987, 9877)
+    elif split_type == "bloc":
+        block_size = 100
+        num_blocks = n_samples // block_size
+        ind = np.arange(n_samples)
+        blocks = np.array_split(np.arange(len(ind)), num_blocks)
+
+        np.random.shuffle(blocks)
+
+        n_blocks = len(blocks)
+
+        train_blocks = blocks[:int(0.8 * n_blocks)]
+        val_blocks   = blocks[int(0.8 * n_blocks):int(0.9 * n_blocks)]
+        test_blocks  = blocks[int(0.9 * n_blocks):]
+
+        train_indices = np.concatenate(train_blocks)
+        val_indices   = np.concatenate(val_blocks)
+        test_indices  = np.concatenate(test_blocks)
+    else:
+        raise ValueError(f"Invalid split: {split}. Use 'train', 'val', or 'test'")
+
+    np.random.shuffle(test_indices)
+    np.random.shuffle(train_indices)
+    np.random.shuffle(val_indices)
+
+    # normalize on train set
+    smomp_max = np.max(np.abs(smomp_channels_real[train_indices]))
+    accurate_max = np.max(np.abs(accurate_channels_real[train_indices]))
     global_max = max(smomp_max, accurate_max)
     smomp_channels_real /= global_max
     accurate_channels_real /=  global_max
@@ -905,17 +888,17 @@ def create_datasets(smomp_file, accurate_file, user_positions_file, rss_processo
     # Pass arrays to each split
     train_dataset = GlobalNormalizedDataset(
         smomp_channels_real, accurate_channels_real, user_positions_file, rss_processor,
-        normalization_params,
+        normalization_params, train_indices, user_noise,
         split='train', train_ratio=0.8, val_ratio=0.1, use_dbm_values=use_dbm_values
     )
     val_dataset = GlobalNormalizedDataset(
         smomp_channels_real, accurate_channels_real, user_positions_file, rss_processor,
-        normalization_params,
+        normalization_params, val_indices, user_noise,
         split='val', train_ratio=0.8, val_ratio=0.1, use_dbm_values=use_dbm_values
     )
     test_dataset = GlobalNormalizedDataset(
         smomp_channels_real, accurate_channels_real, user_positions_file, rss_processor,
-        normalization_params,
+        normalization_params, test_indices, user_noise,
         split='test', train_ratio=0.8, val_ratio=0.1, use_dbm_values=use_dbm_values
     )
 
