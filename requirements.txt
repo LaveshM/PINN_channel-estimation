@@ -2,7 +2,7 @@ torch
 numpy
 scipy
 pandas
-opencv-python
+opencv-python-headless
 Pillow
 matplotlib
 tqdm
