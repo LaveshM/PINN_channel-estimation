@@ -900,6 +900,8 @@ def create_datasets(smomp_file, accurate_file, user_positions_file, rss_processo
     del smomp_channels
     del accurate_channels
 
+    smomp_channels_real = torch.from_numpy(smomp_channels_real).float()
+    accurate_channels_real = torch.from_numpy(accurate_channels_real).float()
     # Pass arrays to each split
     train_dataset = GlobalNormalizedDataset(
         smomp_channels_real, accurate_channels_real, user_positions_file, rss_processor,
