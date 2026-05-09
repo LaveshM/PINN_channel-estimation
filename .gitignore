@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Python
 __pycache__/
 *.py[cod]
@@ -15,9 +14,9 @@ venv/
 .vscode/
 .DS_Store
 *.jpg
-=======
 *.pth
 *.pyc
 *.npy
->>>>>>> d11e16f (introduce split types and user noise params)
 *.png
+*.txt
+*.csv

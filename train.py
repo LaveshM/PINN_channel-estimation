@@ -1,12 +1,14 @@
 import numpy as np
 np.random.seed(42)
+import pandas as pd
 
 from Model import *
+import argparse
 
 def main_train(config, continue_= None):
     
-    config['name_train'] = 'saved/' + config['split_type'] + '_' + str(config['user_noise']) + '/' + os.path.basename(config['name_train'])
-    config['name_val'] = 'saved/' + config['split_type'] + '_' + str(config['user_noise']) + '/' + os.path.basename(config['name_val'])
+    config['name_train'] = 'data/snr' + str(int(config['snr'])) + '/' + config['split_type'] + '_' + str(config['user_noise']) + '/' + os.path.basename(config['name_train'])
+    config['name_val'] = 'data/snr' + str(int(config['snr'])) + '/' + config['split_type'] + '_' + str(config['user_noise']) + '/' + os.path.basename(config['name_val'])
 
     os.makedirs(os.path.dirname(config['name_val']), exist_ok=True)
 
@@ -31,18 +33,18 @@ def main_train(config, continue_= None):
     
     print("outside load")
     train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], 
-                             shuffle=True)
+                             shuffle=True, num_workers=2, persistent_workers=True,prefetch_factor=2, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], 
-                           shuffle=False)
+                           shuffle=False, num_workers=2, persistent_workers=True,prefetch_factor=2, pin_memory=True)
     test_loader = DataLoader(test_dataset, batch_size=config['batch_size'], 
-                            shuffle=False)
+                            shuffle=False, num_workers=2, persistent_workers=True,prefetch_factor=2, pin_memory=True)
     print("outside load")
     # Initialize model
     #model = ImprovedPhysicsInformedUNet(channel_shape=(32, 4, 576))
     model = ImprovedPhysicsInformedUNet(channel_shape=(32, 4, 576))
     # print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     # Train model
-    print("\nStarting training...")
+    print("\nStarting training...", flush=True)
     train_losses, val_losses = train_model(
         model, train_loader, val_loader, 
         epochs=config['epochs'], 
@@ -55,18 +57,18 @@ def main_train(config, continue_= None):
     # Load best model and evaluate on test set
     print("\nEvaluating on test set on best val...")
     model.load_state_dict(torch.load(config['name_val']))
-    test_nmse = evaluate_test_set(model, test_loader, device=config['device'])
+    test_nmse_val = evaluate_test_set(model, test_loader, device=config['device'])
     
-    print(f"\nFinal Test NMSE: {test_nmse:.6f}")
-    print(f"Test NMSE in dB: {10 * np.log10(test_nmse):.2f} dB")
+    print(f"\nFinal Test NMSE: {test_nmse_val:.6f}")
+    print(f"Test NMSE in dB: {10 * np.log10(test_nmse_val):.2f} dB")
 
     print("\nEvaluating on test set on best train...")
     checkpoint = torch.load(config['name_train'])
     model.load_state_dict(checkpoint['model_state_dict'])
-    test_nmse = evaluate_test_set(model, test_loader, device=config['device'])
+    test_nmse_train = evaluate_test_set(model, test_loader, device=config['device'])
     
-    print(f"\nFinal Test NMSE: {test_nmse:.6f}")
-    print(f"Test NMSE in dB: {10 * np.log10(test_nmse):.2f} dB")
+    print(f"\nFinal Test NMSE: {test_nmse_train:.6f}")
+    print(f"Test NMSE in dB: {10 * np.log10(test_nmse_train):.2f} dB")
     
     print("\nEvaluating on train set on best val...")
     model.load_state_dict(torch.load(config['name_val']))
@@ -75,6 +77,23 @@ def main_train(config, continue_= None):
     print(f"\nFinal Train NMSE: {train_nmse:.6f}")
     print(f"Test NMSE in dB: {10 * np.log10(train_nmse):.2f} dB")
     
+    row = {
+        "snr": config["snr"],
+        "split_type": config["split_type"],
+        "user_noise": config["user_noise"],
+        "train_nmse": train_nmse,
+        "test_nmse_val": test_nmse_val,
+        "test_nmse_train": test_nmse_train,
+    }
+    csv_path = 'data/results_pinn.csv'
+    df_row = pd.DataFrame([row])
+
+    # if file doesn't exist → write header, else append
+    if not os.path.exists(csv_path):
+        df_row.to_csv(csv_path, index=False)
+    else:
+        df_row.to_csv(csv_path, mode='a', header=False, index=False)
+        
     # Plot training curves
     plt.figure(figsize=(10, 5))
     plt.subplot(1, 2, 1)
@@ -101,28 +120,62 @@ def main_train(config, continue_= None):
     return model, val_loader, test_loader
 
 if __name__ == "__main__":
-    # Configuration
+
+    parser = argparse.ArgumentParser(description="Train model")
+    parser.add_argument('--smomp_file',           type=str,   default='Dataset/initial_estimate_ls_snr0.npy')
+    parser.add_argument('--accurate_file',         type=str,   default='Dataset/3D_channel_15GHz_2x2_Pt50.npy')
+    parser.add_argument('--user_positions_file',   type=str,   default='Dataset/ue_positions_noisy.txt')
+    parser.add_argument('--rss_image_path',        type=str,   default='Dataset/50_15GHz.jpg')
+    parser.add_argument('--bs_pixel_coords',       type=int,   nargs=2, default=[287, 293])
+    parser.add_argument('--bs_real_coords',        type=float, nargs=2, default=[71.06, 246.29])
+    parser.add_argument('--image_width_meters',    type=float, default=527.5)
+    parser.add_argument('--batch_size',            type=int,   default=32)
+    parser.add_argument('--epochs',                type=int,   default=500)
+    parser.add_argument('--learning_rate',         type=float, default=1e-3)
+    parser.add_argument('--device',                type=str,   default='cuda')
+    parser.add_argument('--name_val',              type=str,   default='simple_ls_val.pth')
+    parser.add_argument('--name_train',            type=str,   default='simple_ls_train.pth')
+    parser.add_argument('--split_type',            type=str,   default='loc')
+    parser.add_argument('--user_noise',            type=float, default=1.0)
+    parser.add_argument('--snr',                   type=float, default=0.0)
+    parser.add_argument('--continue_training',     action='store_true')
+    args = parser.parse_args()
+
     config = {
-<<<<<<< HEAD
-        'smomp_file': 'initial_estimate_ls_snr0.npy',
-        'accurate_file': '3D_channel_15GHz_2x2_Pt50.npy',
-        'user_positions_file': 'ue_positions_noisy.txt',
-=======
-        'smomp_file': 'Dataset/initial_estimate_ls_snr0.npy',
-        'accurate_file': 'Dataset/3D_channel_15GHz_2x2_Pt50.npy',
-        'user_positions_file': 'Dataset/ue_positions_noisy.txt',
->>>>>>> d944406 (init)
-        'rss_image_path': 'Dataset/50_15GHz.jpg',
-        'bs_pixel_coords': (287, 293),
-        'bs_real_coords': (71.06, 246.29),
-        'image_width_meters': 527.5,
-        'batch_size': 32,
-        'epochs': 500,
-        'learning_rate': 1e-3,
-        'device': 'cuda',
-        'name_val':'simple_ls_0_val.pth',
-        'name_train':'simple_ls_0_train.pth',
-        'split_type': 'loc',
-        'user_noise': 1 # mention standard deviation
+        'smomp_file':           args.smomp_file,
+        'accurate_file':        args.accurate_file,
+        'user_positions_file':  args.user_positions_file,
+        'rss_image_path':       args.rss_image_path,
+        'bs_pixel_coords':      tuple(args.bs_pixel_coords),
+        'bs_real_coords':       tuple(args.bs_real_coords),
+        'image_width_meters':   args.image_width_meters,
+        'batch_size':           args.batch_size,
+        'epochs':               args.epochs,
+        'learning_rate':        args.learning_rate,
+        'device':               args.device,
+        'name_val':             args.name_val,
+        'name_train':           args.name_train,
+        'split_type':           args.split_type,
+        'user_noise':           args.user_noise,
+        'snr':                  args.snr
     }
-    model = main_train(config, continue_=True)
+
+    model = main_train(config, continue_=args.continue_training)
+    # config = {
+    #     'smomp_file': 'Dataset/initial_estimate_ls_snr0.npy',
+    #     'accurate_file': 'Dataset/3D_channel_15GHz_2x2_Pt50.npy',
+    #     'user_positions_file': 'Dataset/ue_positions_noisy.txt',
+    #     'rss_image_path': 'Dataset/50_15GHz.jpg',
+    #     'bs_pixel_coords': (287, 293),
+    #     'bs_real_coords': (71.06, 246.29),
+    #     'image_width_meters': 527.5,
+    #     'batch_size': 32,
+    #     'epochs': 500,
+    #     'learning_rate': 1e-3,
+    #     'device': 'cuda',
+    #     'name_val':'simple_ls_0_val.pth',
+    #     'name_train':'simple_ls_0_train.pth',
+    #     'split_type': 'loc',
+    #     'user_noise': 1 # mention standard deviation
+    # }
+    # model = main_train(config, continue_=True)

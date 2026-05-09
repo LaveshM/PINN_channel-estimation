@@ -609,7 +609,7 @@ def train_model(model, train_loader, val_loader, epochs=100, lr=1e-3, device='cu
         train_loss = 0
         train_nmse = 0
         
-        pbar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{epochs} [Train]')
+        pbar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{epochs} [Train]', disable=True)
         for smomp, accurate, rss in pbar:
             smomp = smomp.to(device)
             accurate = accurate.to(device)
@@ -642,7 +642,7 @@ def train_model(model, train_loader, val_loader, epochs=100, lr=1e-3, device='cu
         val_nmse = 0
         
         with torch.no_grad():
-            for smomp, accurate, rss in tqdm(val_loader, desc=f'Epoch {epoch+1}/{epochs} [Val]'):
+            for smomp, accurate, rss in tqdm(val_loader, desc=f'Epoch {epoch+1}/{epochs} [Val]', disable=True):
                 smomp = smomp.to(device)
                 accurate = accurate.to(device)
                 rss = rss.to(device)
@@ -660,7 +660,7 @@ def train_model(model, train_loader, val_loader, epochs=100, lr=1e-3, device='cu
         scheduler.step()
         
         print(f'Epoch {epoch+1}: Train Loss={avg_train_loss:.4f}, Train NMSE={avg_train_nmse:.4f}, '
-              f'Val Loss={avg_val_loss:.4f}, Val NMSE={avg_val_nmse:.4f}')
+              f'Val Loss={avg_val_loss:.4f}, Val NMSE={avg_val_nmse:.4f}', flush=True)
 
         # Save checkpoint periodically
         if (epoch + 1) % save_frequency == 0:
@@ -686,7 +686,7 @@ def evaluate_test_set(model, test_loader, device='cuda'):
     n_samples = 0
     
     with torch.no_grad():
-        for smomp, accurate, rss in tqdm(test_loader, desc='Testing'):
+        for smomp, accurate, rss in tqdm(test_loader, desc='Testing', disable=True):
             smomp = smomp.to(device)
             accurate = accurate.to(device)
             rss = rss.to(device)
@@ -720,8 +720,12 @@ class GlobalNormalizedDataset(Dataset):
         # Set random seed for reproducible splits
         np.random.seed(random_seed)
                 
-        self.smomp_channels_normalized = smomp_file        # parameter is now an array
-        self.accurate_channels_normalized = accurate_file  # parameter is now an array
+        # self.smomp_channels_normalized = smomp_file        # parameter is now an array
+        # self.accurate_channels_normalized = accurate_file  # parameter is now an array
+        
+        self.smomp_channels_normalized = np.load(smomp_file, mmap_mode='r')
+        self.accurate_channels_normalized = np.load(accurate_file, mmap_mode='r')
+        self.rss_cache = np.load('data/rss_cache_0.5.npy', mmap_mode='r')
 
         # Load user positions
         self.user_positions = []
@@ -770,58 +774,88 @@ class GlobalNormalizedDataset(Dataset):
         real_idx = self.indices[idx]
         
         # Get normalized channels (already normalized globally)
-        smomp_channel = self.smomp_channels_normalized[real_idx]
-        accurate_channel = self.accurate_channels_normalized[real_idx]
+        # smomp_channel = self.smomp_channels_normalized[real_idx]
+        # accurate_channel = self.accurate_channels_normalized[real_idx]
+        # rss_tensor = self._rss_cache[real_idx]
         
-        # Get RSS map
-        user_idx = real_idx #% len(self.user_positions)
-        user_x, user_y = self.user_positions[user_idx]
-        
-        # add noise to the location
-        user_x += np.random.normal(0, self.user_noise)
-        user_y += np.random.normal(0, self.user_noise)
-        
-        rss_crop = self.rss_processor.crop_around_user(user_x, user_y, self.crop_size)
-        
-        if rss_crop is None:
-            rss_crop = np.zeros((self.crop_size, self.crop_size, 3), dtype=np.float32)
-        
-        if self.use_dbm_values:
-            # Convert RGB to dBm values
-            rss_dbm = self.rss_color_mapper.rgb_to_dbm(rss_crop)
-            rss_dbm_normalized = self.rss_color_mapper.normalize_dbm(rss_dbm)
+        smomp_tensor = torch.as_tensor(self.smomp_channels_normalized[real_idx].copy()) / self.normalization_params['smomp_max']
+        accurate_tensor = torch.as_tensor(self.accurate_channels_normalized[real_idx].copy()) / self.normalization_params['accurate_max']
+        rss_tensor = torch.as_tensor(self.rss_cache[real_idx].copy())
+
+
+        # return smomp_tensor.astype(torch.float32), accurate_tensor.astype(torch.float32), rss_tensor
+        return smomp_tensor.float(), accurate_tensor.float(), rss_tensor
+
+    def pre_rss_processing(self):
+        print("Pre-computing RSS tensors...")
+        self._rss_cache = {}
+        for i in range(len(self.smomp_channels_normalized)):
+            real_idx = i
+            # Get RSS map
+            user_idx = real_idx % len(self.user_positions)
+            user_x, user_y = self.user_positions[user_idx]
+            # np.random.seed(i)  # Ensure reproducibility for each sample
+            # # add noise to the location
+            # user_x += np.random.normal(0, self.user_noise)
+            # user_y += np.random.normal(0, self.user_noise)
             
-            # Also keep grayscale for texture information
-            rss_gray = cv2.cvtColor(rss_crop.astype(np.uint8), cv2.COLOR_RGB2GRAY)
-            rss_gray_normalized = rss_gray.astype(np.float32) / 255.0
+            rss_crop = self.rss_processor.crop_around_user(user_x, user_y, self.crop_size)
             
-            # Stack both channels: grayscale and normalized dBm
-            rss_tensor = torch.stack([
-                torch.from_numpy(rss_gray_normalized).float(),
-                torch.from_numpy(rss_dbm_normalized).float()
-            ], dim=0)
-        else:
-            # Original grayscale only
-            rss_gray = cv2.cvtColor(rss_crop.astype(np.uint8), cv2.COLOR_RGB2GRAY)
-            rss_normalized = rss_gray.astype(np.float32) / 255.0
-            rss_tensor = torch.from_numpy(rss_normalized).unsqueeze(0).float()
-        
-        return smomp_channel, accurate_channel, rss_tensor
+            if rss_crop is None:
+                rss_crop = np.zeros((self.crop_size, self.crop_size, 3), dtype=np.float32)
+            
+            if self.use_dbm_values:
+                # Convert RGB to dBm values
+                rss_dbm = self.rss_color_mapper.rgb_to_dbm(rss_crop)
+                rss_dbm_normalized = self.rss_color_mapper.normalize_dbm(rss_dbm)
+                
+                # Also keep grayscale for texture information
+                rss_gray = cv2.cvtColor(rss_crop.astype(np.uint8), cv2.COLOR_RGB2GRAY)
+                rss_gray_normalized = rss_gray.astype(np.float32) / 255.0
+                
+                # Stack both channels: grayscale and normalized dBm
+                # rss_tensor = torch.stack([
+                #     torch.from_numpy(rss_gray_normalized).float(),
+                #     torch.from_numpy(rss_dbm_normalized).float()
+                # ], dim=0)
+                self._rss_cache[i] = np.stack([rss_gray_normalized, rss_dbm_normalized], axis=0)
+
+            else:
+                # Original grayscale only
+                rss_gray = cv2.cvtColor(rss_crop.astype(np.uint8), cv2.COLOR_RGB2GRAY)
+                # rss_normalized = rss_gray.astype(np.float32) / 255.0
+                self._rss_cache[i] = rss_gray.astype(np.float32)[np.newaxis] / 255.0
+                # rss_tensor = torch.from_numpy(rss_normalized).unsqueeze(0).float()
+            # self._rss_cache[i] = rss_tensor
+        all_rss = np.stack([self._rss_cache[i] for i in range(len(self.smomp_channels_normalized))], axis=0)  # (N, C, H, W)
+        np.save('data/rss_cache_0.5.npy', all_rss)
+        exit()
+        print("Finished pre-computing RSS tensors.")
+        return
+        # return smomp_channel, accurate_channel, rss_tensor
 def create_datasets(smomp_file, accurate_file, user_positions_file, split_type, user_noise, rss_processor, use_dbm_values=True):
     
     # Load once
     print("Loading data...")
-    smomp_channels = np.load(smomp_file)
-    accurate_channels = np.load(accurate_file)
+    smomp_channels_real = np.load(smomp_file)
+    accurate_channels_real = np.load(accurate_file)
+    # rss_cache = np.load('data/rss_cache_0.5.npy', mmap_mode='r')
+
     print("Loaded.")
 
     # Convert complex to real/imag
-    smomp_channels_real = np.concatenate([np.real(smomp_channels), np.imag(smomp_channels)], axis=1)
-    accurate_channels_real = np.concatenate([np.real(accurate_channels), np.imag(accurate_channels)], axis=1)
-
+    # smomp_channels_real = np.concatenate([np.real(smomp_channels), np.imag(smomp_channels)], axis=1)
+    # accurate_channels_real = np.concatenate([np.real(accurate_channels), np.imag(accurate_channels)], axis=1)
+    # print(smomp_channels_real.dtype)
+    # np.save(smomp_file.replace('.npy', '_real.npy'), smomp_channels_real)
+    # np.save(accurate_file.replace('.npy', '_real.npy'), accurate_channels_real)
+    # exit()
+    
+    # rss_cache = torch.from_numpy(np.load('data/rss_cache_0.5.npy', mmap_mode='r').copy()).float()
+    
     train_ratio = 0.8
     val_ratio = 0.1
-    n_samples = len(smomp_channels_real)
+    n_samples = 9877
   
     # user_positions = []
     # with open(user_positions_file, 'r') as f:
@@ -872,33 +906,33 @@ def create_datasets(smomp_file, accurate_file, user_positions_file, split_type, 
     smomp_max = np.max(np.abs(smomp_channels_real[train_indices]))
     accurate_max = np.max(np.abs(accurate_channels_real[train_indices]))
     global_max = max(smomp_max, accurate_max)
-    smomp_channels_real /= global_max
-    accurate_channels_real /=  global_max
+    # smomp_channels_real /= global_max
+    # accurate_channels_real /=  global_max
 
     normalization_params = {
             'smomp_max': smomp_max,
             'accurate_max': accurate_max
         }
 
-    del smomp_channels
-    del accurate_channels
+    del smomp_channels_real
+    del accurate_channels_real
 
-    smomp_channels_real = torch.from_numpy(smomp_channels_real).float()
-    accurate_channels_real = torch.from_numpy(accurate_channels_real).float()
+    # smomp_channels_real = torch.from_numpy(smomp_channels_real).float()
+    # accurate_channels_real = torch.from_numpy(accurate_channels_real).float()
     # Pass arrays to each split
     train_dataset = GlobalNormalizedDataset(
-        smomp_channels_real, accurate_channels_real, user_positions_file, rss_processor,
-        normalization_params, train_indices, user_noise,
+        smomp_file=smomp_file, accurate_file=accurate_file, user_positions_file=user_positions_file, rss_processor=rss_processor,
+        normalization_params=normalization_params, indices=train_indices, user_noise=user_noise, 
         split='train', train_ratio=0.8, val_ratio=0.1, use_dbm_values=use_dbm_values
     )
     val_dataset = GlobalNormalizedDataset(
-        smomp_channels_real, accurate_channels_real, user_positions_file, rss_processor,
-        normalization_params, val_indices, user_noise,
+        smomp_file=smomp_file, accurate_file=accurate_file, user_positions_file=user_positions_file, rss_processor=rss_processor,
+        normalization_params=normalization_params, indices=val_indices, user_noise=user_noise, 
         split='val', train_ratio=0.8, val_ratio=0.1, use_dbm_values=use_dbm_values
     )
     test_dataset = GlobalNormalizedDataset(
-        smomp_channels_real, accurate_channels_real, user_positions_file, rss_processor,
-        normalization_params, test_indices, user_noise,
+        smomp_file=smomp_file, accurate_file=accurate_file, user_positions_file=user_positions_file, rss_processor=rss_processor,
+        normalization_params=normalization_params, indices=test_indices, user_noise=user_noise, 
         split='test', train_ratio=0.8, val_ratio=0.1, use_dbm_values=use_dbm_values
     )
 

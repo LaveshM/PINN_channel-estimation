@@ -1,4 +1,5 @@
 import argparse
+import os
 
 import numpy as np
 from scipy.interpolate import interp1d
@@ -281,12 +282,20 @@ def create_ls_ofdm_estimates(true_channels_file, output_file,
     print(f"Using LS OFDM estimation with {method} method")
     
     # Initialize estimator
-    estimator = LSOFDMChannelEstimator(
+    # estimator = LSOFDMChannelEstimator(
+    #     N_tap=N_tap,
+    #     N_rx=N_rx,
+    #     N_tx=N_tx,
+    #     N_subcarriers=N_subcarriers,
+    #     pilot_spacing=pilot_spacing,
+    #     SNR_dB=SNR_dB
+    # )
+    
+    estimator = InitialChannelEstimator(
         N_tap=N_tap,
         N_rx=N_rx,
         N_tx=N_tx,
-        N_subcarriers=N_subcarriers,
-        pilot_spacing=pilot_spacing,
+        # N_pilots=pilot_spacing,
         SNR_dB=SNR_dB
     )
     
@@ -309,6 +318,9 @@ def create_ls_ofdm_estimates(true_channels_file, output_file,
     print(f"  NMSE: {nmse:.6f} ({nmse_db:.2f} dB)")
     
     # Save
+    output_dir = os.path.dirname(output_file)
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
     np.save(output_file, estimated_channels)
     print(f"Saved to: {output_file}")
     
@@ -443,7 +455,7 @@ def _parse_args():
                         help="Signal-to-noise ratio in dB (default: 0).")
     parser.add_argument("--n-subcarriers", type=int, default=1024,
                         help="Number of OFDM subcarriers (default: 1024).")
-    parser.add_argument("--pilot-spacing", type=int, default=4,
+    parser.add_argument("--pilot-spacing", type=int, default=16,
                         help="Pilot subcarrier spacing; N_pilots = N_subcarriers / "
                              "pilot_spacing (default: 4, i.e. 256 pilots).")
     parser.add_argument("--seed", type=int, default=0,
