@@ -81,9 +81,9 @@ def main_train(config, continue_= None):
         "snr": config["snr"],
         "split_type": config["split_type"],
         "user_noise": config["user_noise"],
-        "train_nmse": train_nmse,
-        "test_nmse_val": test_nmse_val,
-        "test_nmse_train": test_nmse_train,
+        "train_nmse": 10 * np.log10(train_nmse),
+        "test_nmse_val": 10 * np.log10(test_nmse_train),
+        "test_nmse_train": 10 * np.log10(test_nmse_train),
     }
     csv_path = 'data/results_pinn.csv'
     df_row = pd.DataFrame([row])
@@ -114,7 +114,7 @@ def main_train(config, continue_= None):
     plt.title('Validation Loss')
     
     plt.tight_layout()
-    plt.savefig('saved/' + config['split_type'] + '_' + str(config['user_noise']) + '/' + 'training_curves.png')
+    plt.savefig('data/snr' + str(int(config['snr'])) + '/' + config['split_type'] + '_' + str(config['user_noise']) + '/' + 'training_curves.png')
     plt.show()
 
     return model, val_loader, test_loader
@@ -137,7 +137,7 @@ if __name__ == "__main__":
     parser.add_argument('--name_train',            type=str,   default='simple_ls_train.pth')
     parser.add_argument('--split_type',            type=str,   default='loc')
     parser.add_argument('--user_noise',            type=float, default=1.0)
-    parser.add_argument('--snr',                   type=float, default=0.0)
+    parser.add_argument('--snr',                    type=float, default=0.0)
     parser.add_argument('--continue_training',     action='store_true')
     args = parser.parse_args()
 

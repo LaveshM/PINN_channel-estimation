@@ -778,8 +778,8 @@ class GlobalNormalizedDataset(Dataset):
         # accurate_channel = self.accurate_channels_normalized[real_idx]
         # rss_tensor = self._rss_cache[real_idx]
         
-        smomp_tensor = torch.as_tensor(self.smomp_channels_normalized[real_idx].copy()) / self.normalization_params['smomp_max']
-        accurate_tensor = torch.as_tensor(self.accurate_channels_normalized[real_idx].copy()) / self.normalization_params['accurate_max']
+        smomp_tensor = torch.as_tensor(self.smomp_channels_normalized[real_idx].copy()) / self.normalization_params['global_max']
+        accurate_tensor = torch.as_tensor(self.accurate_channels_normalized[real_idx].copy()) / self.normalization_params['global_max']
         rss_tensor = torch.as_tensor(self.rss_cache[real_idx].copy())
 
 
@@ -911,7 +911,8 @@ def create_datasets(smomp_file, accurate_file, user_positions_file, split_type, 
 
     normalization_params = {
             'smomp_max': smomp_max,
-            'accurate_max': accurate_max
+            'accurate_max': accurate_max,
+            'global_max': global_max
         }
 
     del smomp_channels_real
