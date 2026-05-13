@@ -725,7 +725,6 @@ class GlobalNormalizedDataset(Dataset):
         
         self.smomp_channels_normalized = np.load(smomp_file, mmap_mode='r')
         self.accurate_channels_normalized = np.load(accurate_file, mmap_mode='r')
-        self.rss_cache = np.load('data/rss_cache_0.5.npy', mmap_mode='r')
 
         # Load user positions
         self.user_positions = []
@@ -743,6 +742,10 @@ class GlobalNormalizedDataset(Dataset):
 
         # Initialize RSS color mapper
         self.rss_color_mapper = RSSColorMapper(min_dbm=-110.0, max_dbm=-40.0)
+        
+        if not os.path.exists(f'data/rss_cache_{user_noise}.npy'):
+            self.pre_rss_processing(user_noise)
+        self.rss_cache = np.load(f'data/rss_cache_{user_noise}.npy', mmap_mode='r')
         
         self.indices = indices
         
@@ -786,7 +789,7 @@ class GlobalNormalizedDataset(Dataset):
         # return smomp_tensor.astype(torch.float32), accurate_tensor.astype(torch.float32), rss_tensor
         return smomp_tensor.float(), accurate_tensor.float(), rss_tensor
 
-    def pre_rss_processing(self):
+    def pre_rss_processing(self, user_noise):
         print("Pre-computing RSS tensors...")
         self._rss_cache = {}
         for i in range(len(self.smomp_channels_normalized)):
@@ -828,15 +831,29 @@ class GlobalNormalizedDataset(Dataset):
                 # rss_tensor = torch.from_numpy(rss_normalized).unsqueeze(0).float()
             # self._rss_cache[i] = rss_tensor
         all_rss = np.stack([self._rss_cache[i] for i in range(len(self.smomp_channels_normalized))], axis=0)  # (N, C, H, W)
-        np.save('data/rss_cache_0.5.npy', all_rss)
-        exit()
+        np.save('data/rss_cache_' + str(user_noise) + '.npy', all_rss)
         print("Finished pre-computing RSS tensors.")
+        del self._rss_cache
         return
         # return smomp_channel, accurate_channel, rss_tensor
 def create_datasets(smomp_file, accurate_file, user_positions_file, split_type, user_noise, rss_processor, use_dbm_values=True):
     
     # Load once
     print("Loading data...")
+    for file_path in [smomp_file, accurate_file]:
+        if not os.path.exists(file_path):
+            name_file = file_path.replace('_real.npy', '.npy')
+            if os.path.exists(name_file):
+                print(f"Found preprocessed file {name_file}, saving real stacked.")
+                channel = np.load(name_file)
+                channel_real = np.concatenate([np.real(channel), np.imag(channel)], axis=1)
+                np.save(file_path, channel_real)
+                del channel
+                del channel_real
+            else:
+                print(f"File {file_path} not found. Please run the preprocessing step to create it.")
+                exit()
+                
     smomp_channels_real = np.load(smomp_file)
     accurate_channels_real = np.load(accurate_file)
     # rss_cache = np.load('data/rss_cache_0.5.npy', mmap_mode='r')
@@ -844,8 +861,8 @@ def create_datasets(smomp_file, accurate_file, user_positions_file, split_type, 
     print("Loaded.")
 
     # Convert complex to real/imag
-    # smomp_channels_real = np.concatenate([np.real(smomp_channels), np.imag(smomp_channels)], axis=1)
-    # accurate_channels_real = np.concatenate([np.real(accurate_channels), np.imag(accurate_channels)], axis=1)
+    # smomp_channels_real = np.concatenate([np.real(smomp_channels_real), np.imag(smomp_channels_real)], axis=1)
+    # accurate_channels_real = np.concatenate([np.real(accurate_channels_real), np.imag(accurate_channels_real)], axis=1)
     # print(smomp_channels_real.dtype)
     # np.save(smomp_file.replace('.npy', '_real.npy'), smomp_channels_real)
     # np.save(accurate_file.replace('.npy', '_real.npy'), accurate_channels_real)
@@ -866,6 +883,15 @@ def create_datasets(smomp_file, accurate_file, user_positions_file, split_type, 
     #             user_positions.append((x, y))
     
     if split_type== "random":
+        indices = np.random.permutation(n_samples)
+    
+        n_train = int(n_samples * train_ratio)
+        n_val = int(n_samples * val_ratio)
+        
+        train_indices = indices[:n_train]
+        val_indices = indices[n_train:n_train + n_val]
+        test_indices = indices[n_train + n_val:]
+    elif split_type== "new_random":
         indices = np.random.permutation(n_samples)
     
         n_train = int(n_samples * train_ratio)
