@@ -5,6 +5,9 @@ import pandas as pd
 from Model import *
 import argparse
 
+def nmse_db(x):
+    return 10 * np.log10(x)
+
 def main_train(config, continue_= None):
     
     config['name_train'] = 'data/snr' + str(int(config['snr'])) + '/' + config['split_type'] + '_' + str(config['user_noise']) + '/' + os.path.basename(config['name_train'])
@@ -55,35 +58,64 @@ def main_train(config, continue_= None):
         )
     
     # Load best model and evaluate on test set
-    print("\nEvaluating on test set on best val...")
-    model.load_state_dict(torch.load(config['name_val']))
-    test_nmse_val = evaluate_test_set(model, test_loader, device=config['device'])
+    # print("\nEvaluating on test set on best val...")
+    # model.load_state_dict(torch.load(config['name_val']))
+    # test_nmse_val = evaluate_test_set(model, test_loader, device=config['device'])
     
-    print(f"\nFinal Test NMSE: {test_nmse_val:.6f}")
-    print(f"Test NMSE in dB: {10 * np.log10(test_nmse_val):.2f} dB")
+    # print(f"\nFinal Test NMSE: {test_nmse_val:.6f}")
+    # print(f"Test NMSE in dB: {10 * np.log10(test_nmse_val):.2f} dB")
 
-    print("\nEvaluating on test set on best train...")
+    # print("\nEvaluating on test set on best train...")
+    # checkpoint = torch.load(config['name_train'])
+    # model.load_state_dict(checkpoint['model_state_dict'])
+    # test_nmse_train = evaluate_test_set(model, test_loader, device=config['device'])
+    
+    # print(f"\nFinal Test NMSE: {test_nmse_train:.6f}")
+    # print(f"Test NMSE in dB: {10 * np.log10(test_nmse_train):.2f} dB")
+    
+    # print("\nEvaluating on train set on best val...")
+    # model.load_state_dict(torch.load(config['name_val']))
+    # train_nmse = evaluate_test_set(model, train_loader, device=config['device'])
+    
+    # print(f"\nFinal Train NMSE: {train_nmse:.6f}")
+    # print(f"Test NMSE in dB: {10 * np.log10(train_nmse):.2f} dB")
+    
+    model_val = model
+    model_train = model
+    model_val.load_state_dict(torch.load(config['name_val']))
+
+    # Best training model
     checkpoint = torch.load(config['name_train'])
-    model.load_state_dict(checkpoint['model_state_dict'])
-    test_nmse_train = evaluate_test_set(model, test_loader, device=config['device'])
+    model_train.load_state_dict(checkpoint['model_state_dict'])
     
-    print(f"\nFinal Test NMSE: {test_nmse_train:.6f}")
-    print(f"Test NMSE in dB: {10 * np.log10(test_nmse_train):.2f} dB")
+    results = {
+        "Train Set": {
+            "Best Val": nmse_db(evaluate_test_set(model_val, train_loader, device=config['device'])),
+            "Best Train": nmse_db(evaluate_test_set(model_train, train_loader, device=config['device'])),
+        },
+        "Test Set": {
+            "Best Val": nmse_db(evaluate_test_set(model_val, test_loader, device=config['device'])),
+            "Best Train": nmse_db(evaluate_test_set(model_train, test_loader, device=config['device'])),
+        }
+    }
     
-    print("\nEvaluating on train set on best val...")
-    model.load_state_dict(torch.load(config['name_val']))
-    train_nmse = evaluate_test_set(model, train_loader, device=config['device'])
-    
-    print(f"\nFinal Train NMSE: {train_nmse:.6f}")
-    print(f"Test NMSE in dB: {10 * np.log10(train_nmse):.2f} dB")
-    
+    print("\nNMSE (dB) Results:\n")
+    print(f"{'':<12}{'Best Val':>15}{'Best Train':>15}")
+    print("-" * 42)
+
+    for row in results:
+        print(f"{row:<12}{results[row]['Best Val']:>15.2f}{results[row]['Best Train']:>15.2f}")
+
     row = {
         "snr": config["snr"],
         "split_type": config["split_type"],
         "user_noise": config["user_noise"],
-        "train_nmse": 10 * np.log10(train_nmse),
-        "test_nmse_val": 10 * np.log10(test_nmse_train),
-        "test_nmse_train": 10 * np.log10(test_nmse_train),
+        # "train_nmse": 10 * np.log10(train_nmse),
+        # "test_nmse_val": 10 * np.log10(test_nmse_train),
+        # "test_nmse_train": 10 * np.log10(test_nmse_train),
+        "train_nmse": results["Train Set"]["Best Val"],
+        "test_nmse_val": results["Test Set"]["Best Val"],
+        "test_nmse_train": results["Test Set"]["Best Train"]
     }
     csv_path = 'data/results_pinn.csv'
     df_row = pd.DataFrame([row])

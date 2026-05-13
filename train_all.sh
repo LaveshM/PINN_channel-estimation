@@ -1,6 +1,6 @@
 #!/bin/bash
 
-mkdir -p logs
+mkdir -p logs/noise_3.0
 
 SNR_LIST=(-10 -5 0 5)
 SPLIT_LIST=("random" "bloc")
@@ -30,12 +30,12 @@ for split in "${SPLIT_LIST[@]}"; do
     CUDA_VISIBLE_DEVICES=$gpu python train.py \
         --smomp_file data/snr${snr}/initial_estimate_ls_real.npy \
         --accurate_file data/3D_channel_15GHz_2x2_Pt50_real.npy \
-        --user_positions_file data/ue_positions_noisy_0.5.txt \
+        --user_positions_file data/ue_positions_noisy_3.0.txt \
         --split_type $split \
-        --user_noise 0.5 \
+        --user_noise 3.0 \
         --snr $snr \
         --continue_training \
-        > logs/snr${snr}_${split}.log 2>&1 &
+        > logs/noise_3.0/snr${snr}_${split}.log 2>&1 &
 
     # update GPU job count
     gpu_jobs[$gpu]=$((gpu_jobs[$gpu] + 1))
