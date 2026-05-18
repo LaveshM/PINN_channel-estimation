@@ -1,6 +1,6 @@
 import numpy as np
-np.random.seed(42)
 import pandas as pd
+import copy
 
 from Model import *
 import argparse
@@ -9,7 +9,8 @@ def nmse_db(x):
     return 10 * np.log10(x)
 
 def main_train(config, continue_= None):
-    
+    set_seed(config.get('seed', 42))
+
     config['name_train'] = 'data/snr' + str(int(config['snr'])) + '/' + config['split_type'] + '_' + str(config['user_noise']) + '/' + os.path.basename(config['name_train'])
     config['name_val'] = 'data/snr' + str(int(config['snr'])) + '/' + config['split_type'] + '_' + str(config['user_noise']) + '/' + os.path.basename(config['name_val'])
 
@@ -31,9 +32,27 @@ def main_train(config, continue_= None):
     )
     print("outside rss")
     # Create datasets
-    train_dataset, val_dataset, test_dataset = create_datasets(config['smomp_file'], config['accurate_file'], 
+    train_dataset, val_dataset, test_dataset, ls_nmse_train, ls_nmse_val, ls_nmse_test = create_datasets(
+        config['smomp_file'], config['accurate_file'],
         config['user_positions_file'], config['split_type'], config['user_noise'], rss_processor)
-    
+
+    # Save LS baseline row immediately so it's available even if training is interrupted
+    ls_row = {
+        "snr":             config["snr"],
+        "split_type":      "LS",
+        "user_noise":      config["user_noise"],
+        "train_nmse":      ls_nmse_train,
+        "test_nmse_val":   ls_nmse_val,
+        "test_nmse_train": ls_nmse_test,
+    }
+    csv_path = config['results_csv']
+    ls_df = pd.DataFrame([ls_row])
+    if not os.path.exists(csv_path):
+        ls_df.to_csv(csv_path, index=False)
+    else:
+        ls_df.to_csv(csv_path, mode='a', header=False, index=False)
+    print(f"LS NMSE — train: {ls_nmse_train:.2f} dB  val: {ls_nmse_val:.2f} dB  test: {ls_nmse_test:.2f} dB")
+
     print("outside load")
     train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], 
                              shuffle=True, num_workers=2, persistent_workers=True,prefetch_factor=2, pin_memory=True)
@@ -80,11 +99,10 @@ def main_train(config, continue_= None):
     # print(f"\nFinal Train NMSE: {train_nmse:.6f}")
     # print(f"Test NMSE in dB: {10 * np.log10(train_nmse):.2f} dB")
     
-    model_val = model
-    model_train = model
+    model_val = copy.deepcopy(model)
     model_val.load_state_dict(torch.load(config['name_val']))
 
-    # Best training model
+    model_train = copy.deepcopy(model)
     checkpoint = torch.load(config['name_train'])
     model_train.load_state_dict(checkpoint['model_state_dict'])
     
@@ -117,7 +135,7 @@ def main_train(config, continue_= None):
         "test_nmse_val": results["Test Set"]["Best Val"],
         "test_nmse_train": results["Test Set"]["Best Train"]
     }
-    csv_path = 'data/results_pinn.csv'
+    csv_path = config['results_csv']
     df_row = pd.DataFrame([row])
 
     # if file doesn't exist → write header, else append
@@ -156,7 +174,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train model")
     parser.add_argument('--smomp_file',           type=str,   default='Dataset/initial_estimate_ls_snr0.npy')
     parser.add_argument('--accurate_file',         type=str,   default='Dataset/3D_channel_15GHz_2x2_Pt50.npy')
-    parser.add_argument('--user_positions_file',   type=str,   default='Dataset/ue_positions_noisy.txt')
+    parser.add_argument('--user_positions_file',   type=str,   default=None,
+                        help="UE positions file. Defaults to data/UE/ue_positions_{user_noise}.txt")
     parser.add_argument('--rss_image_path',        type=str,   default='Dataset/50_15GHz.jpg')
     parser.add_argument('--bs_pixel_coords',       type=int,   nargs=2, default=[287, 293])
     parser.add_argument('--bs_real_coords',        type=float, nargs=2, default=[71.06, 246.29])
@@ -171,7 +190,12 @@ if __name__ == "__main__":
     parser.add_argument('--user_noise',            type=float, default=1.0)
     parser.add_argument('--snr',                    type=float, default=0.0)
     parser.add_argument('--continue_training',     action='store_true')
+    parser.add_argument('--seed',                  type=int,   default=42)
+    parser.add_argument('--results_csv',           type=str,   default='data/results.csv')
     args = parser.parse_args()
+
+    if args.user_positions_file is None:
+        args.user_positions_file = f'data/UE/ue_positions_{args.user_noise}.txt'
 
     config = {
         'smomp_file':           args.smomp_file,
@@ -189,7 +213,9 @@ if __name__ == "__main__":
         'name_train':           args.name_train,
         'split_type':           args.split_type,
         'user_noise':           args.user_noise,
-        'snr':                  args.snr
+        'snr':                  args.snr,
+        'seed':                 args.seed,
+        'results_csv':          args.results_csv,
     }
 
     model = main_train(config, continue_=args.continue_training)

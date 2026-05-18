@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-np.random.seed(42)
+import random as _random
 from torch.utils.data import Dataset, DataLoader
 import cv2
 from PIL import Image
@@ -15,6 +15,17 @@ import math
 from matplotlib.colors import LinearSegmentedColormap
 # Import the RSS map processor
 from find_in_map import RSSMapProcessor
+
+
+def set_seed(seed: int = 42) -> None:
+    """Set all relevant RNG seeds for reproducibility."""
+    _random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
 
 class ImprovedRSSColorMapper:
     """Improved RSS color to dBm mapper using actual colormap lookup"""
@@ -586,32 +597,40 @@ def load_checkpoint(model, optimizer, scheduler, checkpoint_path='checkpoint.pth
 
 
 def train_model(model, train_loader, val_loader, epochs=100, lr=1e-3, device='cuda',
-                model_name_val = 'best_model.pth', model_name_train = 'last_model.pth', continue_=None):
+                model_name_val='best_model.pth', model_name_train='last_model.pth', continue_=None):
     """Training loop"""
+    import time
+
     save_frequency = 20
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=40, gamma=0.65)
     criterion = PhysicsInformedLoss(alpha=0.01)
-    
+
     train_losses = []
-    val_losses = []
-    start_epoch = 0
+    val_losses   = []
+    start_epoch  = 0
     best_val_nmse = float('inf')
     if continue_:
-        # Load checkpoint if exists
         start_epoch, train_losses, val_losses, best_val_nmse = load_checkpoint(
-        model, optimizer, scheduler, model_name_train)
-    
+            model, optimizer, scheduler, model_name_train)
+
+    epoch_w   = len(str(epochs))   # width for epoch counter
+    header    = (f"{'Epoch':>{epoch_w + len(str(epochs)) + 1}}  "
+                 f"{'TrLoss':>8}  {'TrNMSE':>8}  {'VaLoss':>8}  {'VaNMSE':>8}  {'Time':>7}")
+    separator = "-" * len(header)
+    print(header, flush=True)
+    print(separator, flush=True)
+
     for epoch in range(start_epoch, epochs):
-        # Training phase
+        t0 = time.perf_counter()
+
+        # ── training ──────────────────────────────────────────────────────────
         model.train()
-        train_loss = 0
-        train_nmse = 0
-        
-        pbar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{epochs} [Train]', disable=True)
-        for smomp, accurate, rss in pbar:
-            smomp = smomp.to(device)
+        train_loss = train_nmse = 0
+
+        for smomp, accurate, rss in train_loader:
+            smomp    = smomp.to(device)
             accurate = accurate.to(device)
             rss = rss.to(device)
             #print(smomp.shape)
@@ -630,7 +649,7 @@ def train_model(model, train_loader, val_loader, epochs=100, lr=1e-3, device='cu
             train_loss += loss.item()
             train_nmse += nmse.item()
             
-            pbar.set_postfix({'Loss': loss.item(), 'NMSE': nmse.item()})
+            # pbar.set_postfix({'Loss': loss.item(), 'NMSE': nmse.item()})
         
         avg_train_loss = train_loss / len(train_loader)
         avg_train_nmse = train_nmse / len(train_loader)
@@ -642,37 +661,43 @@ def train_model(model, train_loader, val_loader, epochs=100, lr=1e-3, device='cu
         val_nmse = 0
         
         with torch.no_grad():
-            for smomp, accurate, rss in tqdm(val_loader, desc=f'Epoch {epoch+1}/{epochs} [Val]', disable=True):
-                smomp = smomp.to(device)
+            for smomp, accurate, rss in val_loader:
+                smomp    = smomp.to(device)
                 accurate = accurate.to(device)
-                rss = rss.to(device)
-                
+                rss      = rss.to(device)
+
                 pred = model(smomp, rss)
                 loss, nmse, _ = criterion(pred, accurate, rss)
-                
+
                 val_loss += loss.item()
                 val_nmse += nmse.item()
-        
+
         avg_val_loss = val_loss / len(val_loader)
         avg_val_nmse = val_nmse / len(val_loader)
         val_losses.append(avg_val_loss)
-        
-        scheduler.step()
-        
-        print(f'Epoch {epoch+1}: Train Loss={avg_train_loss:.4f}, Train NMSE={avg_train_nmse:.4f}, '
-              f'Val Loss={avg_val_loss:.4f}, Val NMSE={avg_val_nmse:.4f}', flush=True)
 
-        # Save checkpoint periodically
+        scheduler.step()
+
+        elapsed = time.perf_counter() - t0
+        marker  = "*" if avg_val_nmse < best_val_nmse else " "
+        print(
+            f"{marker}{epoch + 1:>{epoch_w}}/{epochs}  "
+            f"{avg_train_loss:>8.4f}  {avg_train_nmse:>8.4f}  "
+            f"{avg_val_loss:>8.4f}  {avg_val_nmse:>8.4f}  "
+            f"{elapsed:>6.1f}s",
+            flush=True,
+        )
+
+        # ── checkpointing ─────────────────────────────────────────────────────
         if (epoch + 1) % save_frequency == 0:
-            save_checkpoint(model, optimizer, scheduler, epoch, train_losses, 
-                          val_losses, best_val_nmse, model_name_train)
-        # Save best model
+            save_checkpoint(model, optimizer, scheduler, epoch, train_losses,
+                            val_losses, best_val_nmse, model_name_train)
+
         if avg_val_nmse < best_val_nmse:
             best_val_nmse = avg_val_nmse
             torch.save(model.state_dict(), model_name_val)
-            print(f'Saved best model with Val NMSE={avg_val_nmse:.4f} at {model_name_val}')
 
-    print('Last trained model saved')
+    print(separator, flush=True)
     return train_losses, val_losses
 
 
@@ -743,9 +768,13 @@ class GlobalNormalizedDataset(Dataset):
         # Initialize RSS color mapper
         self.rss_color_mapper = RSSColorMapper(min_dbm=-110.0, max_dbm=-40.0)
         
-        if not os.path.exists(f'data/rss_cache_{user_noise}.npy'):
-            self.pre_rss_processing(user_noise)
-        self.rss_cache = np.load(f'data/rss_cache_{user_noise}.npy', mmap_mode='r')
+        _pos_stem = os.path.splitext(os.path.basename(user_positions_file))[0]
+        _ue_dir   = os.path.join('ndata', _pos_stem)
+        os.makedirs(_ue_dir, exist_ok=True)
+        _cache_path = os.path.join(_ue_dir, 'rss_cache.npy')
+        if not os.path.exists(_cache_path):
+            self.pre_rss_processing(user_noise, _cache_path)
+        self.rss_cache = np.load(_cache_path, mmap_mode='r')
         
         self.indices = indices
         
@@ -781,15 +810,19 @@ class GlobalNormalizedDataset(Dataset):
         # accurate_channel = self.accurate_channels_normalized[real_idx]
         # rss_tensor = self._rss_cache[real_idx]
         
-        smomp_tensor = torch.as_tensor(self.smomp_channels_normalized[real_idx].copy()) / self.normalization_params['global_max']
-        accurate_tensor = torch.as_tensor(self.accurate_channels_normalized[real_idx].copy()) / self.normalization_params['global_max']
+        s = self.smomp_channels_normalized[real_idx]
+        a = self.accurate_channels_normalized[real_idx]
+
+        scale = self.normalization_params['global_max']
+        smomp_tensor    = torch.as_tensor(s.copy()).float() / scale
+        accurate_tensor = torch.as_tensor(a.copy()).float() / scale
         rss_tensor = torch.as_tensor(self.rss_cache[real_idx].copy())
 
+        return smomp_tensor, accurate_tensor, rss_tensor
 
-        # return smomp_tensor.astype(torch.float32), accurate_tensor.astype(torch.float32), rss_tensor
-        return smomp_tensor.float(), accurate_tensor.float(), rss_tensor
-
-    def pre_rss_processing(self, user_noise):
+    def pre_rss_processing(self, user_noise, cache_path=None):
+        if cache_path is None:
+            cache_path = os.path.join('data', 'UE', 'rss_cache_' + str(user_noise) + '.npy')
         print("Pre-computing RSS tensors...")
         self._rss_cache = {}
         for i in range(len(self.smomp_channels_normalized)):
@@ -831,34 +864,60 @@ class GlobalNormalizedDataset(Dataset):
                 # rss_tensor = torch.from_numpy(rss_normalized).unsqueeze(0).float()
             # self._rss_cache[i] = rss_tensor
         all_rss = np.stack([self._rss_cache[i] for i in range(len(self.smomp_channels_normalized))], axis=0)  # (N, C, H, W)
-        np.save('data/rss_cache_' + str(user_noise) + '.npy', all_rss)
+        np.save(cache_path, all_rss)
         print("Finished pre-computing RSS tensors.")
         del self._rss_cache
         return
         # return smomp_channel, accurate_channel, rss_tensor
+
+
+
+def _ensure_real_npy(real_path):
+    """Return real_path after ensuring a real-stacked .npy exists there.
+
+    If real_path doesn't exist and ends with _real.npy, tries to load the
+    complex base file and convert it. Raises FileNotFoundError otherwise.
+    """
+    if os.path.exists(real_path):
+        return real_path
+
+    if real_path.endswith('_real.npy'):
+        base_path = real_path[:-len('_real.npy')] + '.npy'
+    else:
+        raise FileNotFoundError(f"File not found: {real_path}")
+
+    if not os.path.exists(base_path):
+        raise FileNotFoundError(
+            f"Neither '{real_path}' nor '{base_path}' found."
+        )
+
+    print(f"Converting {base_path} -> {real_path} ...")
+    arr = np.load(base_path)
+    if np.iscomplexobj(arr):
+        real_stacked = np.concatenate([np.real(arr), np.imag(arr)], axis=1)
+    elif np.isfloat32(arr.dtype) or np.float64(arr.dtype):
+        return base_path  # Already real, just return the original path
+    else:
+        raise ValueError(f"Unsupported data type in {base_path}: {arr.dtype}")
+    np.save(real_path, real_stacked)
+    print(f"Saved {real_path}")
+    os.remove(base_path)
+    print(f"Deleted {base_path}")
+    return real_path
+
+
 def create_datasets(smomp_file, accurate_file, user_positions_file, split_type, user_noise, rss_processor, use_dbm_values=True):
-    
-    # Load once
+
     print("Loading data...")
-    for file_path in [smomp_file, accurate_file]:
-        if not os.path.exists(file_path):
-            name_file = file_path.replace('_real.npy', '.npy')
-            if os.path.exists(name_file):
-                print(f"Found preprocessed file {name_file}, saving real stacked.")
-                channel = np.load(name_file)
-                channel_real = np.concatenate([np.real(channel), np.imag(channel)], axis=1)
-                np.save(file_path, channel_real)
-                del channel
-                del channel_real
-            else:
-                print(f"File {file_path} not found. Please run the preprocessing step to create it.")
-                exit()
-                
-    smomp_channels_real = np.load(smomp_file)
-    accurate_channels_real = np.load(accurate_file)
-    # rss_cache = np.load('data/rss_cache_0.5.npy', mmap_mode='r')
+    smomp_file    = _ensure_real_npy(smomp_file)
+    accurate_file = _ensure_real_npy(accurate_file)
+
+    # mmap: only the indexed rows are paged in — no full array in RAM
+    smomp_channels_real  = np.load(smomp_file,   mmap_mode='r')
+    accurate_channels_real = np.load(accurate_file, mmap_mode='r')
 
     print("Loaded.")
+
 
     # Convert complex to real/imag
     # smomp_channels_real = np.concatenate([np.real(smomp_channels_real), np.imag(smomp_channels_real)], axis=1)
@@ -872,7 +931,7 @@ def create_datasets(smomp_file, accurate_file, user_positions_file, split_type, 
     
     train_ratio = 0.8
     val_ratio = 0.1
-    n_samples = 9877
+    n_samples = len(smomp_channels_real)
   
     # user_positions = []
     # with open(user_positions_file, 'r') as f:
@@ -922,18 +981,26 @@ def create_datasets(smomp_file, accurate_file, user_positions_file, split_type, 
         val_indices   = np.concatenate(val_blocks)
         test_indices  = np.concatenate(test_blocks)
     else:
-        raise ValueError(f"Invalid split: {split}. Use 'train', 'val', or 'test'")
+        raise ValueError(f"Invalid split_type: {split_type}. Use 'random', 'bloc', or 'loc'")
 
     np.random.shuffle(test_indices)
     np.random.shuffle(train_indices)
     np.random.shuffle(val_indices)
 
+    # LS baseline NMSE computed separately per split
+    def _ls_nmse(idx):
+        s = smomp_channels_real[idx].astype(np.float64)
+        a = accurate_channels_real[idx].astype(np.float64)
+        return 10 * np.log10(np.sum((s - a) ** 2) / np.sum(a ** 2))
+
+    ls_nmse_train = _ls_nmse(train_indices)
+    ls_nmse_val   = _ls_nmse(val_indices)
+    ls_nmse_test  = _ls_nmse(test_indices)
+
     # normalize on train set
     smomp_max = np.max(np.abs(smomp_channels_real[train_indices]))
     accurate_max = np.max(np.abs(accurate_channels_real[train_indices]))
     global_max = max(smomp_max, accurate_max)
-    # smomp_channels_real /= global_max
-    # accurate_channels_real /=  global_max
 
     normalization_params = {
             'smomp_max': smomp_max,
@@ -963,35 +1030,6 @@ def create_datasets(smomp_file, accurate_file, user_positions_file, split_type, 
         split='test', train_ratio=0.8, val_ratio=0.1, use_dbm_values=use_dbm_values
     )
 
-    return train_dataset, val_dataset, test_dataset
-
-# Usage example:
-# def create_datasets(smomp_file, accurate_file, user_positions_file, rss_processor, use_dbm_values=False):
-#     """Create train, validation, and test datasets with consistent normalization"""
-    
-#     # Create train dataset (this computes global normalization)
-#     train_dataset = GlobalNormalizedDataset(
-#         smomp_file, accurate_file, user_positions_file, rss_processor,
-#         split='train', train_ratio=0.8, val_ratio=0.1, use_dbm_values=use_dbm_values
-#     )
-    
-#     # Get normalization params
-#     norm_params = train_dataset.get_normalization_params()
-#     print(f"Using normalization params: {norm_params}")
-    
-#     # Create val and test datasets with same parameters
-#     # (they will use the same global normalization computed in train dataset)
-#     val_dataset = GlobalNormalizedDataset(
-#         smomp_file, accurate_file, user_positions_file, rss_processor,
-#         split='val', train_ratio=0.8, val_ratio=0.1, use_dbm_values=use_dbm_values
-#     )
-    
-#     test_dataset = GlobalNormalizedDataset(
-#         smomp_file, accurate_file, user_positions_file, rss_processor,
-#         split='test', train_ratio=0.8, val_ratio=0.1, use_dbm_values=use_dbm_values
-#     )
-    
-#     return train_dataset, val_dataset, test_dataset
-
+    return train_dataset, val_dataset, test_dataset, ls_nmse_train, ls_nmse_val, ls_nmse_test
 
 
