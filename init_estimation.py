@@ -262,7 +262,8 @@ class LSOFDMChannelEstimator:
 
 def create_ls_ofdm_estimates(true_channels_file, output_file,
                             N_subcarriers=1024, pilot_spacing=4,
-                            SNR_dB=10, method='basic'):
+                            SNR_dB=10, method='basic',
+                            fixed_noise_power=None):
     """
     Create LS OFDM channel estimates.
     
@@ -295,14 +296,24 @@ def create_ls_ofdm_estimates(true_channels_file, output_file,
         N_tap=N_tap,
         N_rx=N_rx,
         N_tx=N_tx,
-        # N_pilots=pilot_spacing,
-        SNR_dB=SNR_dB
+        SNR_dB=SNR_dB,
+        fixed_noise_power=fixed_noise_power,
     )
-    
+    _fixed_arr = isinstance(fixed_noise_power, np.ndarray)
+    if fixed_noise_power is not None:
+        if _fixed_arr:
+            print(f"Per-sample fixed noise power: array of shape {fixed_noise_power.shape}  "
+                  f"(mean={float(np.mean(fixed_noise_power)):.4e})")
+        else:
+            print(f"Fixed noise power: {fixed_noise_power:.4e}  "
+                  f"(ignoring per-sample SNR-adaptive noise)")
+
     # Estimate channels
     estimated_channels = np.zeros_like(true_channels)
-    
+
     for i in tqdm(range(N_samples), desc="Estimating channels"):
+        if _fixed_arr:
+            estimator.fixed_noise_power = float(fixed_noise_power[i])
         if method == 'basic':
             estimated_channels[i] = estimator.estimate_channel(true_channels[i])
         else:
@@ -333,22 +344,26 @@ class InitialChannelEstimator:
     Uses pilot-based estimation with realistic impairments.
     """
     
-    def __init__(self, N_tap=16, N_rx=4, N_tx=576, N_pilots=64, SNR_dB=10):
+    def __init__(self, N_tap=16, N_rx=4, N_tx=576, N_pilots=64, SNR_dB=10,
+                 fixed_noise_power=None):
         """
         Initialize the channel estimator.
-        
+
         Args:
             N_tap: Number of delay taps (16)
             N_rx: Number of receive antennas (4)
             N_tx: Number of transmit antennas (576)
             N_pilots: Number of pilot symbols per antenna
             SNR_dB: Signal-to-noise ratio in dB for pilot transmission
+            fixed_noise_power: If set, use this fixed noise power for all samples
+                               instead of per-sample SNR-adaptive noise.
         """
         self.N_tap = N_tap
         self.N_rx = N_rx
         self.N_tx = N_tx
         self.N_pilots = N_pilots
         self.SNR_dB = SNR_dB
+        self.fixed_noise_power = fixed_noise_power
         
         # Generate orthogonal pilot sequences using DFT matrix
         self.generate_pilot_patterns()
@@ -398,21 +413,24 @@ class InitialChannelEstimator:
         This simulates realistic pilot-based channel estimation.
         """
         estimated_channel = np.zeros_like(true_channel)
-        
-        # Signal power from true channel
-        signal_power = np.mean(np.abs(true_channel)**2)
-        noise_power = signal_power / (10**(self.SNR_dB/10))
-        
+
+        # Fixed noise (hardware floor) or per-sample SNR-adaptive noise
+        if self.fixed_noise_power is not None:
+            noise_power = self.fixed_noise_power
+        else:
+            signal_power = np.mean(np.abs(true_channel)**2)
+            noise_power  = signal_power / (10 ** (self.SNR_dB / 10))
+
         for tap in range(self.N_tap):
             for rx in range(self.N_rx):
                 # Extract true channel for this tap and antenna
                 h_true = true_channel[tap, rx, :]
-                
+
                 # Simulate pilot transmission at selected positions
                 h_pilots = h_true[self.pilot_positions]
-                
+
                 # Add noise to pilot measurements
-                noise = np.sqrt(noise_power/2) * (np.random.randn(self.N_pilots) + 
+                noise = np.sqrt(noise_power/2) * (np.random.randn(self.N_pilots) +
                                                   1j * np.random.randn(self.N_pilots))
                 h_pilots_noisy = h_pilots + noise
                 
@@ -460,12 +478,32 @@ def _parse_args():
                              "pilot_spacing (default: 4, i.e. 256 pilots).")
     parser.add_argument("--seed", type=int, default=0,
                         help="NumPy random seed for reproducibility (default: 0).")
+    parser.add_argument("--fixed-noise", action="store_true", dest="fixed_noise",
+                        help="Use a fixed noise floor instead of per-sample SNR-adaptive "
+                             "noise. The noise power is derived from --ref-channel's "
+                             "average signal power at the given SNR.")
+    parser.add_argument("--ref-channel", type=str, default=None, dest="ref_channel",
+                        help="Reference channel file used to compute the fixed noise "
+                             "power (required when --fixed-noise is set). Typically "
+                             "the unblocked run_0000 channels.")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = _parse_args()
     np.random.seed(args.seed)
+
+    fixed_noise_power = None
+    if args.fixed_noise:
+        ref_path = args.ref_channel or args.true_channels
+        ref_ch   = np.load(ref_path)
+        avg_power = float(np.mean(np.abs(ref_ch) ** 2))
+        fixed_noise_power = avg_power / (10 ** (args.snr / 10))
+        print(f"Fixed-noise mode:")
+        print(f"  ref file   : {ref_path}  shape={ref_ch.shape}")
+        print(f"  avg power  : {avg_power:.4e}")
+        print(f"  noise power: {fixed_noise_power:.4e}  (SNR={args.snr} dB)")
+
     create_ls_ofdm_estimates(
         true_channels_file=args.true_channels,
         output_file=args.output,
@@ -473,4 +511,5 @@ if __name__ == "__main__":
         pilot_spacing=args.pilot_spacing,
         SNR_dB=args.snr,
         method='basic',
+        fixed_noise_power=fixed_noise_power,
     )

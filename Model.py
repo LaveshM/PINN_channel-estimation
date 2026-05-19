@@ -768,10 +768,8 @@ class GlobalNormalizedDataset(Dataset):
         # Initialize RSS color mapper
         self.rss_color_mapper = RSSColorMapper(min_dbm=-110.0, max_dbm=-40.0)
         
-        _pos_stem = os.path.splitext(os.path.basename(user_positions_file))[0]
-        _ue_dir   = os.path.join('ndata', _pos_stem)
-        os.makedirs(_ue_dir, exist_ok=True)
-        _cache_path = os.path.join(_ue_dir, 'rss_cache.npy')
+        _cache_path = os.path.join(os.path.dirname(os.path.abspath(user_positions_file)),
+                                   'rss_cache.npy')
         if not os.path.exists(_cache_path):
             self.pre_rss_processing(user_noise, _cache_path)
         self.rss_cache = np.load(_cache_path, mmap_mode='r')
@@ -941,7 +939,7 @@ def create_datasets(smomp_file, accurate_file, user_positions_file, split_type, 
     #             x, y, z = map(float, line.strip().split())
     #             user_positions.append((x, y))
     
-    if split_type== "random":
+    if split_type == "random":
         indices = np.random.permutation(n_samples)
     
         n_train = int(n_samples * train_ratio)
@@ -950,7 +948,7 @@ def create_datasets(smomp_file, accurate_file, user_positions_file, split_type, 
         train_indices = indices[:n_train]
         val_indices = indices[n_train:n_train + n_val]
         test_indices = indices[n_train + n_val:]
-    elif split_type== "new_random":
+    elif split_type== "fix_noise":
         indices = np.random.permutation(n_samples)
     
         n_train = int(n_samples * train_ratio)
