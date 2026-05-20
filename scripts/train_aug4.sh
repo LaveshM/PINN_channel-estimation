@@ -1,16 +1,26 @@
 #!/usr/bin/env bash
-# train_all.sh
-# ------------
-# Train the PINN for all SNR × split_type combinations.
-# Requires data/run_0000/ to exist (run scripts/generate_data.sh first).
+# scripts/train_aug4.sh
+# ---------------------
+# Experiment 4 — train on augmented data (run_0010, 20 trucks) for all three
+# LS input modes: adaptive, fixed, refnoise.
+#
+# For each mode × split combination a separate model is trained and saved to:
+#   models/aug/{mode}/snr0/{split}_3.0/simple_ls_val.pth
 #
 # ── CONFIG — edit these ───────────────────────────────────────────────────────
 GPU_IDS=(0 1 2 3)
 MAX_JOBS_PER_GPU=2
+AUG_DIR="data/run_0010"
+MODELS_DIR="models/aug"
+SNR=0
 USER_NOISE=3.0
-SNR_LIST=(-10 -5 0 5)
-SPLIT_LIST=(random bloc)
 EPOCHS=500
+SPLIT_LIST=(random)
+# LS mode name → corresponding LS file in AUG_DIR
+declare -A LS_FILES
+LS_FILES[adaptive]="ls_snr+0.npy"
+LS_FILES[fixed]="ls_snr+0_fixed.npy"
+LS_FILES[refnoise]="ls_snr+0_refnoise.npy"
 # ─────────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -19,21 +29,21 @@ cd "$(dirname "$0")/.."
 GPU_COUNT=${#GPU_IDS[@]}
 MAX_CONCURRENT=$(( MAX_JOBS_PER_GPU * GPU_COUNT ))
 
-RUN0="data/run_0000"
-CH_FILE="${RUN0}/channels.npy"
-POS_FILE="${RUN0}/locations_noisy.txt"
-LOG_DIR="logs/noise_${USER_NOISE}"
+CH_FILE="${AUG_DIR}/channels.npy"
+POS_FILE="${AUG_DIR}/locations_noisy.txt"
+LOG_DIR="logs/aug4"
 
 mkdir -p "$LOG_DIR"
-mkdir -p "models"
+mkdir -p "$MODELS_DIR"
 
 echo "============================================================"
-echo "  train_all.sh"
-echo "  GPUs     : ${GPU_IDS[*]}  ($MAX_CONCURRENT concurrent jobs)"
-echo "  SNR list : ${SNR_LIST[*]}"
+echo "  train_aug4.sh — Experiment 4"
+echo "  GPU IDs  : ${GPU_IDS[*]}  ($MAX_CONCURRENT concurrent jobs)"
 echo "  Splits   : ${SPLIT_LIST[*]}"
-echo "  Noise    : ${USER_NOISE} m   Epochs: ${EPOCHS}"
-echo "  Data     : $RUN0"
+echo "  LS modes : ${!LS_FILES[*]}"
+echo "  SNR      : ${SNR} dB   Noise: ${USER_NOISE} m   Epochs: ${EPOCHS}"
+echo "  Data     : $AUG_DIR"
+echo "  Models   : $MODELS_DIR"
 echo "============================================================"
 
 # guard: data must exist
@@ -45,12 +55,10 @@ if [ ! -f "$POS_FILE" ]; then
     echo "ERROR: $POS_FILE not found. Run scripts/generate_data.sh first."
     exit 1
 fi
-for snr in "${SNR_LIST[@]}"; do
-    snr_int=$snr
-    snr_tag=$(python3 -c "s=$snr; print(f'+{int(s)}' if s>=0 else str(int(s)))")
-    ls_file="${RUN0}/ls_snr${snr_tag}.npy"
+for mode in "${!LS_FILES[@]}"; do
+    ls_file="${AUG_DIR}/${LS_FILES[$mode]}"
     if [ ! -f "$ls_file" ]; then
-        echo "ERROR: $ls_file not found. Run scripts/generate_data.sh with --snr-list $snr."
+        echo "ERROR: $ls_file not found."
         exit 1
     fi
 done
@@ -59,15 +67,15 @@ echo ""
 echo "Launching training jobs ..."
 job_index=0
 
-for snr in "${SNR_LIST[@]}"; do
+for mode in adaptive fixed refnoise; do
 for split in "${SPLIT_LIST[@]}"; do
 
-    snr_tag=$(python3 -c "s=$snr; print(f'+{int(s)}' if s>=0 else str(int(s)))")
-    ls_file="${RUN0}/ls_snr${snr_tag}.npy"
+    ls_file="${AUG_DIR}/${LS_FILES[$mode]}"
+    model_subdir="${MODELS_DIR}/${mode}"
     gpu=${GPU_IDS[$((job_index % GPU_COUNT))]}
-    log="$LOG_DIR/snr${snr}_${split}.log"
+    log="${LOG_DIR}/${mode}_${split}.log"
 
-    echo "  snr=$snr  split=$split  → GPU $gpu  (log: $log)"
+    echo "  mode=${mode}  split=${split}  → GPU ${gpu}  (log: ${log})"
 
     CUDA_VISIBLE_DEVICES=$gpu python3 train.py \
         --smomp_file          "$ls_file" \
@@ -75,11 +83,10 @@ for split in "${SPLIT_LIST[@]}"; do
         --user_positions_file "$POS_FILE" \
         --split_type          "$split" \
         --user_noise          "$USER_NOISE" \
-        --snr                 "$snr" \
+        --snr                 "$SNR" \
         --epochs              "$EPOCHS" \
-        --model_dir           "models" \
-        --results_csv         "models/results_pinn.csv" \
-        --continue_training \
+        --model_dir           "$model_subdir" \
+        --results_csv         "${MODELS_DIR}/results_aug4.csv" \
         > "$log" 2>&1 &
 
     job_index=$(( job_index + 1 ))
@@ -96,5 +103,6 @@ wait
 echo ""
 echo "============================================================"
 echo "  Done. Logs in $LOG_DIR/"
-echo "  Results  in data/results_pinn.csv"
+echo "  Results  in ${MODELS_DIR}/results_aug4.csv"
+echo "  Models   in ${MODELS_DIR}/{adaptive,fixed,refnoise}/snr0/"
 echo "============================================================"

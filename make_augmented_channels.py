@@ -39,6 +39,7 @@ Parallel generation (split by run range, same seed → consistent trucks):
 """
 
 import argparse
+import glob
 import json
 import os
 import re as _re
@@ -89,7 +90,13 @@ class Truck:
 
 
 def _ray_intersects_obb(p0, p1, truck):
-    """Slab test in the truck's local frame (XY only — truck is tall)."""
+    """
+    3-D slab test in the truck's local frame.
+    XY slab determines the parametric interval [t_min, t_max] where the
+    segment is inside the truck footprint.  A Z-height check then confirms
+    the segment actually passes through the physical truck volume [0, truck.h].
+    Paths that pass entirely above the truck roof are not attenuated.
+    """
     dx0, dy0 = p0[0] - truck.cx, p0[1] - truck.cy
     dx1, dy1 = p1[0] - truck.cx, p1[1] - truck.cy
     c, s = truck.cos_h, truck.sin_h
@@ -107,7 +114,16 @@ def _ray_intersects_obb(p0, p1, truck):
             t2 = (hi - p_lo) / d
             t_min = max(t_min, min(t1, t2))
             t_max = min(t_max, max(t1, t2))
-    return t_min <= t_max
+    if t_min > t_max:
+        return False
+    # Z check: segment Z at entry and exit of the XY slab
+    z0, z1 = float(p0[2]), float(p1[2])
+    z_entry = z0 + t_min * (z1 - z0)
+    z_exit  = z0 + t_max * (z1 - z0)
+    z_seg_min = min(z_entry, z_exit)
+    z_seg_max = max(z_entry, z_exit)
+    # intersects truck volume only if the Z range overlaps [0, truck.h]
+    return z_seg_min <= truck.h and z_seg_max >= 0.0
 
 
 def path_intersects_truck(inter_locs, truck):
@@ -269,9 +285,10 @@ def _apply_blockage(df, valid_indices, trucks, losses_db,
         for mpc_idx, bounce_path in enumerate(paths):
             if mpc_idx >= len(pg_raw):
                 break
-            total_loss = sum(losses_db[vi, j]
+            intercepting = [losses_db[vi, j]
                              for j, truck in enumerate(trucks)
-                             if path_intersects_truck(bounce_path, truck))
+                             if path_intersects_truck(bounce_path, truck)]
+            total_loss = max(intercepting) if intercepting else 0.0
             if total_loss > 0:
                 pg_modified[mpc_idx] -= total_loss
 
@@ -289,7 +306,8 @@ def _apply_blockage(df, valid_indices, trucks, losses_db,
 
 def _generate_ls(ch_real, snr_db, ref_noise_per_sample=None):
     """
-    Generate real-stacked LS estimates from real-stacked channels.
+    Generate real-stacked LS estimates from channels.
+    Accepts either real-stacked float32 (N,32,4,576) or complex128 (N,16,4,576).
     Uses per-sample ref_noise_per_sample if provided (fixed noise floor),
     otherwise uses SNR-adaptive noise per sample.
     """
@@ -375,15 +393,29 @@ def _run_one(run_id, n_trucks, df, xyz_all, valid_indices,
              run_dir, plot_path, cfg,
              parsed_paths, parsed_pg, parsed_toa,
              ls_modes=("adaptive",),
-             snr_info=None):
+             snr_info=None,
+             overwrite=False):
     """
     snr_info : dict  snr_value → (snr_tag, fixed_noise_scalar, ref_noise_per_sample)
     noise_seed: int  seed for this run's independent GPS noise realization
+    overwrite : bool — delete channel/LS/plot files before processing so they are rebuilt
     """
     if snr_info is None:
         snr_info = {}
 
     os.makedirs(run_dir, exist_ok=True)
+
+    if overwrite:
+        targets = (
+            [os.path.join(run_dir, f) for f in ("channels.npy", "blocked_mask.npy",
+                                                  "blocked_summary.json")]
+            + glob.glob(os.path.join(run_dir, "ls_snr*.npy"))
+            + ([plot_path] if plot_path and os.path.exists(plot_path) else [])
+        )
+        for p in targets:
+            if os.path.exists(p):
+                os.remove(p)
+                print(f"  [run {run_id:04d}]  removed {os.path.basename(p)}")
     bs_xy     = np.array([cfg.bs_x, cfg.bs_y])
     valid_xyz = xyz_all[valid_indices]
 
@@ -429,7 +461,7 @@ def _run_one(run_id, n_trucks, df, xyz_all, valid_indices,
         )
         if len(channel_matrices) == 0:
             print(f"  [run {run_id:04d}] WARNING: no valid channels — skipping.")
-            return
+            return []
 
         # 3. blocked mask from actual tensor power drop vs unblocked reference
         power_orig = np.sum(np.abs(ch_unblocked) ** 2, axis=(1, 2, 3))
@@ -478,7 +510,11 @@ def _run_one(run_id, n_trucks, df, xyz_all, valid_indices,
         noisy_xyz = _add_noise(valid_xyz, cfg.user_noise, run_noise_rng)
         _write_positions(noisy_xyz, noisy_path)
 
-    # 5. generate LS estimates (one file per SNR × mode)
+    # 5. generate LS estimates (one file per SNR × mode) and compute NMSE
+    ch_f32 = ch_real.astype(np.float32)
+    ch_pow = float(np.sum(ch_f32 ** 2))
+    nmse_rows = []
+
     for snr, (snr_tag, fixed_s, ref_arr) in snr_info.items():
         _ls_mode_cfgs = {
             "adaptive":  (f"ls_snr{snr_tag}.npy",          None),
@@ -494,7 +530,18 @@ def _run_one(run_id, n_trucks, df, xyz_all, valid_indices,
             else:
                 print(f"  [run {run_id:04d}]  LS SNR={snr:+.0f} dB ({mode}) exists — skipping")
 
+            ls_f32 = np.load(ls_path, mmap_mode='r').astype(np.float32)
+            nmse   = 10.0 * np.log10(np.sum((ls_f32 - ch_f32) ** 2) / ch_pow)
+            nmse_rows.append({
+                "run_id":  run_id,
+                "snr":     int(snr),
+                "ls_mode": mode,
+                "nmse_db": round(float(nmse), 4),
+            })
+            print(f"  [run {run_id:04d}]  LS NMSE SNR={snr:+.0f} dB ({mode}): {nmse:.2f} dB")
+
     print(f"  [run {run_id:04d}]  done → {run_dir}")
+    return nmse_rows
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
@@ -509,7 +556,7 @@ def _parse_args():
     p.add_argument("--n-runs",   type=int, default=10,
                    help="Number of non-zero-truck runs. Total runs = n_runs+1 "
                         "(including run_0000 with 0 trucks).")
-    p.add_argument("--step",     type=int, default=2,
+    p.add_argument("--step",     type=int, default=5,
                    help="Trucks added per run. run_k has k*step trucks.")
     p.add_argument("--start-run", type=int, default=None,
                    help="First run_id to generate (inclusive). Default: 0.")
@@ -541,11 +588,14 @@ def _parse_args():
     p.add_argument("--truck-height", type=float, default=4.0)
     p.add_argument("--bbox-half",    type=float, default=2.5)
     # attenuation
-    p.add_argument("--atten-min",  type=float, default=3.0)
-    p.add_argument("--atten-max",  type=float, default=12.0)
+    p.add_argument("--atten-min",  type=float, default=2.0)
+    p.add_argument("--atten-max",  type=float, default=10.0)
     # GPS noise
     p.add_argument("--user-noise", type=float, default=0.5)
     p.add_argument("--seed",       type=int,   default=42)
+    p.add_argument("--overwrite",  action="store_true",
+                   help="Delete channel/LS/plot files before regenerating each run. "
+                        "Preserves truck_params.json, locations*.txt, and rss_cache.npy.")
     return p.parse_args()
 
 
@@ -649,6 +699,7 @@ def main():
     print(f"\nGenerating runs {start_run} … {end_run}  "
           f"(step={step} trucks/run, total pool={total_trucks})\n")
 
+    all_nmse_rows = []
     for run_id in run_ids:
         n_trucks  = run_id * step
         trucks_k  = all_trucks[:n_trucks]
@@ -656,7 +707,7 @@ def main():
         run_dir   = os.path.join(args.out_dir, f"run_{run_id:04d}")
         plot_path = os.path.join(plots_dir, f"run_{run_id:04d}.png")
 
-        _run_one(
+        rows = _run_one(
             run_id=run_id, n_trucks=n_trucks,
             df=df, xyz_all=xyz_all, valid_indices=valid_indices,
             trucks=trucks_k, losses_db=losses_k,
@@ -669,12 +720,18 @@ def main():
             parsed_toa=parsed_toa,
             ls_modes=args.ls_modes,
             snr_info=snr_info,
+            overwrite=args.overwrite,
         )
+        if rows:
+            all_nmse_rows.extend(rows)
 
     print(f"\nDone. {len(run_ids)} runs saved under {args.out_dir}/run_XXXX/")
 
     # ── aggregate blockage_summary.csv from all existing runs ─────────────────
     _write_blockage_summary(args.out_dir)
+
+    # ── write LS NMSE summary CSV ──────────────────────────────────────────────
+    _write_ls_nmse_csv(all_nmse_rows)
 
 
 def _write_blockage_summary(out_dir):
@@ -701,6 +758,37 @@ def _write_blockage_summary(out_dir):
         w.writeheader()
         w.writerows(rows)
     print(f"  blockage summary → {csv_path}  ({len(rows)} runs)")
+
+
+def _write_ls_nmse_csv(new_rows, csv_path="models/ls_nmse.csv"):
+    """
+    Merge new_rows with any existing rows in csv_path (keyed by run_id+snr+ls_mode)
+    and write the combined result.  Creates models/ if needed.
+    """
+    import csv as _csv
+
+    if not new_rows:
+        return
+
+    # Load existing rows so partial runs accumulate correctly
+    existing = {}
+    if os.path.exists(csv_path):
+        with open(csv_path, newline="") as f:
+            for row in _csv.DictReader(f):
+                key = (int(row["run_id"]), int(row["snr"]), row["ls_mode"])
+                existing[key] = row
+
+    for row in new_rows:
+        key = (row["run_id"], row["snr"], row["ls_mode"])
+        existing[key] = row
+
+    os.makedirs(os.path.dirname(os.path.abspath(csv_path)), exist_ok=True)
+    fieldnames = ["run_id", "snr", "ls_mode", "nmse_db"]
+    with open(csv_path, "w", newline="") as f:
+        w = _csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        w.writerows(sorted(existing.values(), key=lambda r: (int(r["run_id"]), int(r["snr"]), r["ls_mode"])))
+    print(f"  LS NMSE summary  → {csv_path}  ({len(existing)} rows)")
 
 
 if __name__ == "__main__":

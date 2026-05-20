@@ -1,0 +1,5 @@
+test_snr,split_type,ls_nmse_train,ls_nmse_test,model_nmse_train,model_nmse_test
+-10,random,10.5034,10.4996,-0.5911,-0.8349
+-5,random,6.883,6.8751,-8.6528,-8.4251
+0,random,4.5974,4.5928,-14.2957,-12.7104
+5,random,3.546,3.5418,-13.4142,-12.6592

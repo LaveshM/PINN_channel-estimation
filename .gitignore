@@ -6,7 +6,7 @@ __pycache__/
 venv/
 
 # Generated artifacts from the regeneration pipeline
-*.npy
+# *.npy
 *.pth
 *.log
 

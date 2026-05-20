@@ -11,8 +11,9 @@ def nmse_db(x):
 def main_train(config, continue_= None):
     set_seed(config.get('seed', 42))
 
-    config['name_train'] = 'data/snr' + str(int(config['snr'])) + '/' + config['split_type'] + '_' + str(config['user_noise']) + '/' + os.path.basename(config['name_train'])
-    config['name_val'] = 'data/snr' + str(int(config['snr'])) + '/' + config['split_type'] + '_' + str(config['user_noise']) + '/' + os.path.basename(config['name_val'])
+    _run_subdir = os.path.join(config['model_dir'], 'snr' + str(int(config['snr'])), config['split_type'] + '_' + str(config['user_noise']))
+    config['name_train'] = os.path.join(_run_subdir, os.path.basename(config['name_train']))
+    config['name_val']   = os.path.join(_run_subdir, os.path.basename(config['name_val']))
 
     os.makedirs(os.path.dirname(config['name_val']), exist_ok=True)
 
@@ -164,7 +165,7 @@ def main_train(config, continue_= None):
     plt.title('Validation Loss')
     
     plt.tight_layout()
-    plt.savefig('data/snr' + str(int(config['snr'])) + '/' + config['split_type'] + '_' + str(config['user_noise']) + '/' + 'training_curves.png')
+    plt.savefig(os.path.join(_run_subdir, 'training_curves.png'))
     plt.show()
 
     return model, val_loader, test_loader
@@ -192,6 +193,7 @@ if __name__ == "__main__":
     parser.add_argument('--continue_training',     action='store_true')
     parser.add_argument('--seed',                  type=int,   default=42)
     parser.add_argument('--results_csv',           type=str,   default='data/results.csv')
+    parser.add_argument('--model_dir',             type=str,   default='models')
     args = parser.parse_args()
 
     if args.user_positions_file is None:
@@ -216,6 +218,7 @@ if __name__ == "__main__":
         'snr':                  args.snr,
         'seed':                 args.seed,
         'results_csv':          args.results_csv,
+        'model_dir':            args.model_dir,
     }
 
     model = main_train(config, continue_=args.continue_training)

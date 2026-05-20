@@ -40,9 +40,9 @@ echo "============================================================"
 echo ""
 echo "[Pass 1] All runs — channels + LS at SNR=0 (adaptive, fixed, refnoise)"
 # shellcheck disable=SC2086
-# python3 make_augmented_channels.py $BASE_ARGS \
-#     --snr-list 0 \
-#     --ls-modes adaptive fixed refnoise
+python3 make_augmented_channels.py $BASE_ARGS \
+    --snr-list 0 \
+    --ls-modes adaptive fixed refnoise
 
 echo ""
 echo "[Pass 2] run_0000 only — LS at training SNRs -10, -5, +5 dB (adaptive)"
