@@ -45,6 +45,7 @@ import matplotlib.pyplot as plt
 
 from Model import ImprovedPhysicsInformedUNet, create_datasets, set_seed
 from find_in_map import RSSMapProcessor
+from torch.utils.data import Subset
 
 # ── constants ─────────────────────────────────────────────────────────────────
 RSS_IMAGE   = "Dataset/50_15GHz.jpg"
@@ -99,6 +100,8 @@ def main():
     parser.add_argument("--out-dir",    default="plots")
     parser.add_argument("--device",     default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
+    parser.add_argument("--blocked",    action="store_true",
+                        help="Evaluate only on blocked users in the test split")
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -157,15 +160,34 @@ def main():
             rss_processor=rss_processor,
         )
 
+        ch_arr = np.load(ch_path, mmap_mode="r")
+        ls_arr = np.load(ls_path, mmap_mode="r")
+
+        # optionally restrict to blocked users only
+        eval_indices = test_ds.indices
+        eval_ds      = test_ds
+        if args.blocked:
+            mask_path = os.path.join(run_dir, "blocked_mask.npy")
+            if not os.path.exists(mask_path):
+                print(f"  SKIP --blocked: blocked_mask.npy missing")
+                continue
+            blocked_mask = np.load(mask_path)
+            blocked_set  = set(np.where(blocked_mask)[0])
+            local_pos    = [i for i, ri in enumerate(test_ds.indices) if ri in blocked_set]
+            if not local_pos:
+                print(f"  SKIP --blocked: no blocked users in test split")
+                continue
+            eval_indices = test_ds.indices[np.array(local_pos)]
+            eval_ds      = Subset(test_ds, local_pos)
+            print(f"  --blocked: {len(eval_indices)}/{len(test_ds.indices)} test users are blocked")
+
         test_loader = DataLoader(
-            test_ds, batch_size=args.batch_size,
+            eval_ds, batch_size=args.batch_size,
             shuffle=False, num_workers=2, pin_memory=True,
         )
 
         # LS refnoise baseline
-        ch_arr = np.load(ch_path, mmap_mode="r")
-        ls_arr = np.load(ls_path, mmap_mode="r")
-        ls_nmse = nmse_db_arrays(ls_arr, ch_arr, test_ds.indices)
+        ls_nmse = nmse_db_arrays(ls_arr, ch_arr, eval_indices)
 
         # seed model on this run's test split (refnoise LS input)
         seed_nmse = model_nmse_db(seed_model, test_loader, device)
@@ -225,9 +247,10 @@ def main():
     ax.set_xticklabels([str(r) for r in run_ids])
     ax.set_xlabel("Run ID  (×2 trucks)", fontsize=11)
     ax.set_ylabel("NMSE (dB)", fontsize=11)
+    subset_label = "blocked users only" if args.blocked else "all test users"
     ax.set_title(
-        "Experiment 6 — Seed vs Aug-trained Model\n"
-        "Input: ls_snr+0_refnoise  |  Eval: test split (seed=42)",
+        f"Experiment 6 — Seed vs Aug-trained Model\n"
+        f"Input: ls_snr+0_refnoise  |  Eval: {subset_label} (seed=42)",
         fontsize=11,
     )
     ax.legend(fontsize=9, loc="best")
@@ -242,7 +265,7 @@ def main():
     ax2.set_xlabel("Number of trucks", fontsize=9)
 
     fig.tight_layout()
-    out_path = os.path.join(args.out_dir, "experiment6.png")
+    out_path = os.path.join(args.out_dir, "experiment6_blocked.png" if args.blocked else "experiment6.png")
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
     print(f"Plot → {out_path}")
