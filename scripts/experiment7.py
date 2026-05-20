@@ -11,7 +11,7 @@ we can see whether the gap between splits changes as the mismatch grows.
 The split indices (and the normalisation scale) are fixed to those produced by
 the SNR=0 dataset build, which matches the model's training conditions.
 
-Results → models/old/experiment7.csv
+Results → plots/experiment7.csv
 Plot    → plots/experiment7.png
 
 Usage:
@@ -165,7 +165,7 @@ def main():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--model-dir",  default="models")
     parser.add_argument("--run-dir",    default=RUN_DIR)
-    parser.add_argument("--out-dir",    default="models/old")
+    parser.add_argument("--out-dir",    default="plots")
     parser.add_argument("--split-type", default="random", choices=["random", "bloc"])
     parser.add_argument("--device",     default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--snr-list",   nargs="+", type=float, default=SNR_LIST)
@@ -248,11 +248,12 @@ def main():
         return
 
     df = pd.DataFrame(rows)
+    os.makedirs(args.out_dir, exist_ok=True)
     csv_path = os.path.join(args.out_dir, "experiment7.csv")
     df.to_csv(csv_path, index=False)
     print(f"\nCSV  → {csv_path}")
 
-    save_plot(df, "plots/experiment7.png")
+    save_plot(df, os.path.join(args.out_dir, "experiment7.png"))
 
 
 if __name__ == "__main__":

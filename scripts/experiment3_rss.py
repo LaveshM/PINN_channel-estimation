@@ -12,7 +12,7 @@ For each SNR in {-10, -5, 0, +5} (random split, noise=3.0 m, run_0000):
 
 This shows how sensitive each SNR model is to errors in the RSS map.
 
-Results → models/old/experiment3_rss.csv + experiment3_rss.png
+Results → plots/experiment3_rss.csv + plots/experiment3_rss.png
 
 Usage:
     python3 scripts/experiment3_rss.py
@@ -102,10 +102,9 @@ def _save_plot(df, out_dir):
     Single plot comparing model NMSE with clean RSS (sigma=0) vs perturbed RSS.
     X axis: SNR.  Two groups per SNR: clean and each perturbed sigma.
     LS baseline shown as a separate line.
-    Saved to plots/experiment3_rss.png.
     """
-    os.makedirs("plots", exist_ok=True)
-    out_path = os.path.join("plots", "experiment3_rss.png")
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, "experiment3_rss.png")
 
     snrs   = sorted(df["snr"].unique())
     sigmas = sorted(df["sigma"].unique())
@@ -165,7 +164,7 @@ def main():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--model-dir", default="models")
     parser.add_argument("--run-dir",   default=RUN_DIR)
-    parser.add_argument("--out-dir",   default="models/old")
+    parser.add_argument("--out-dir",   default="plots")
     parser.add_argument("--device",    default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--sigmas",    nargs="+", type=float, default=DEFAULT_SIGMAS,
                         help="Noise std-dev values to sweep (applied to normalised RSS cache)")
@@ -243,6 +242,7 @@ def main():
         return
 
     df = pd.DataFrame(rows)
+    os.makedirs(args.out_dir, exist_ok=True)
     csv_path = os.path.join(args.out_dir, "experiment3_rss.csv")
     df.to_csv(csv_path, index=False)
     print(f"\nCSV  → {csv_path}")

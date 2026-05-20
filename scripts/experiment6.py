@@ -43,7 +43,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from Model import ImprovedPhysicsInformedUNet, create_datasets, set_seed
+from Model import (ImprovedPhysicsInformedUNet, GlobalNormalizedDataset,
+                   create_datasets, set_seed, evaluate_test_set)
 from find_in_map import RSSMapProcessor
 from torch.utils.data import Subset
 
@@ -59,8 +60,7 @@ BATCH_SIZE  = 32
 TRUCKS_PER_RUN = 2
 
 SEED_MODEL_PATH = "models/snr0/random_3.0/simple_ls_val.pth"
-AUG_MODEL_PATH  = "models/aug/refnoise/snr0/random_3.0/simple_ls_val.pth"
-
+AUG_MODEL_PATH  = "models/aug/adaptive/snr0/random_3.0/simple_ls_val.pth"
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -90,7 +90,10 @@ def model_nmse_db(model: torch.nn.Module, loader: DataLoader,
     if total_pow == 0:
         return float("nan")
     return float(10.0 * np.log10(total_err / total_pow))
-
+# def model_nmse_db(model, loader, device):
+#     """Per-sample average NMSE in dB via evaluate_test_set."""
+#     nmse_linear = evaluate_test_set(model, loader, device)
+#     return float(10.0 * np.log10(nmse_linear))
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
@@ -123,6 +126,50 @@ def main():
         bs_real_coords=BS_REAL, image_width_meters=IMG_WIDTH_M,
     )
 
+    # Pre-compute normalization params from each model's training run so inputs
+    # are scaled identically to what each model saw during training.
+    def _get_norm(ls_file, ch_file, pos_file):
+        set_seed(SEED)
+        td, _, _, _, _, _ = create_datasets(
+            smomp_file=ls_file, accurate_file=ch_file,
+            user_positions_file=pos_file,
+            split_type=SPLIT_TYPE, user_noise=USER_NOISE,
+            rss_processor=rss_processor,
+        )
+        return td.normalization_params
+
+    seed_train_dir = os.path.join(args.data_dir, "run_0000")
+    aug_train_dir  = os.path.join(args.data_dir, "run_0010")
+    print("Computing seed normalization from", seed_train_dir)
+    seed_norm = _get_norm(
+        os.path.join(seed_train_dir, "ls_snr+0.npy"),
+        os.path.join(seed_train_dir, "channels.npy"),
+        os.path.join(seed_train_dir, "locations_noisy.txt"),
+    )
+    print(f"  seed global_max = {seed_norm['global_max']:.4e}")
+
+    print("Computing aug  normalization from", aug_train_dir)
+    aug_norm = _get_norm(
+        os.path.join(aug_train_dir, "ls_snr+0.npy"),
+        os.path.join(aug_train_dir, "channels.npy"),
+        os.path.join(aug_train_dir, "locations_noisy.txt"),
+    )
+    print(f"  aug  global_max = {aug_norm['global_max']:.4e}\n")
+
+    # Compute split indices once — deterministic for fixed SEED and n_samples.
+    first_ch = next(
+        (os.path.join(args.data_dir, f"run_{r:04d}", "channels.npy")
+         for r in range(21) if os.path.exists(
+             os.path.join(args.data_dir, f"run_{r:04d}", "channels.npy"))), None
+    )
+    n_samples = np.load(first_ch, mmap_mode="r").shape[0]
+    set_seed(SEED)
+    perm      = np.random.permutation(n_samples)
+    n_train   = int(n_samples * 0.8)
+    n_val     = int(n_samples * 0.1)
+    test_idx  = perm[n_train + n_val:]
+    print(f"Split (seed={SEED}): {n_train} train / {len(test_idx)} test  (n={n_samples})\n")
+
     run_dirs = sorted(glob.glob(os.path.join(args.data_dir, "run_*")))
     if not run_dirs:
         print(f"No run_XXXX directories found in {args.data_dir}")
@@ -131,41 +178,41 @@ def main():
     rows = []
 
     for run_dir in run_dirs:
-        run_id  = int(os.path.basename(run_dir).split("_")[1])
-        ch_path = os.path.join(run_dir, "channels.npy")
-        ls_path = os.path.join(run_dir, "ls_snr+0_refnoise.npy")
+        run_id   = int(os.path.basename(run_dir).split("_")[1])
+        ch_path  = os.path.join(run_dir, "channels.npy")
+        ls_path  = os.path.join(run_dir, "ls_snr+0_refnoise.npy")
         pos_path = os.path.join(run_dir, "locations_noisy.txt")
+        if run_id <16 or run_id < 18:
+            continue
 
-        for p, label in [(ch_path, "channels.npy"),
-                          (ls_path,  "ls_snr+0_refnoise.npy"),
-                          (pos_path, "locations_noisy.txt")]:
-            if not os.path.exists(p):
-                print(f"[run {run_id:04d}] SKIP — {label} missing")
-                break
-        else:
-            pass
         if not (os.path.exists(ch_path) and os.path.exists(ls_path) and os.path.exists(pos_path)):
+            print(f"[run {run_id:04d}] SKIP — required file missing")
             continue
 
         print(f"[run {run_id:04d}]  {run_id * TRUCKS_PER_RUN} trucks  {'─'*44}")
 
-        # -- reproducible test split (same indices across all runs) ------------
-        set_seed(SEED)
-        _, _, test_ds, _, _, _ = create_datasets(
-            smomp_file=ls_path,
-            accurate_file=ch_path,
-            user_positions_file=pos_path,
-            split_type=SPLIT_TYPE,
-            user_noise=USER_NOISE,
-            rss_processor=rss_processor,
-        )
+        ch_arr = np.load(ch_path)
+        ls_arr = np.load(ls_path)
 
-        ch_arr = np.load(ch_path, mmap_mode="r")
-        ls_arr = np.load(ls_path, mmap_mode="r")
+        # Build per-model test datasets using each model's training normalization.
+        def _make_ds(norm):
+            return GlobalNormalizedDataset(
+                smomp_file=ls_path, accurate_file=ch_path,
+                user_positions_file=pos_path,
+                rss_processor=rss_processor,
+                normalization_params=norm,
+                indices=test_idx,
+                user_noise=USER_NOISE,
+                split="test",
+            )
 
-        # optionally restrict to blocked users only
-        eval_indices = test_ds.indices
-        eval_ds      = test_ds
+        seed_ds = _make_ds(seed_norm)
+        aug_ds  = _make_ds(aug_norm)
+
+        eval_indices  = test_idx
+        seed_eval_ds  = seed_ds
+        aug_eval_ds   = aug_ds
+
         if args.blocked:
             mask_path = os.path.join(run_dir, "blocked_mask.npy")
             if not os.path.exists(mask_path):
@@ -173,27 +220,23 @@ def main():
                 continue
             blocked_mask = np.load(mask_path)
             blocked_set  = set(np.where(blocked_mask)[0])
-            local_pos    = [i for i, ri in enumerate(test_ds.indices) if ri in blocked_set]
+            local_pos    = [i for i, ri in enumerate(test_idx) if ri in blocked_set]
             if not local_pos:
                 print(f"  SKIP --blocked: no blocked users in test split")
                 continue
-            eval_indices = test_ds.indices[np.array(local_pos)]
-            eval_ds      = Subset(test_ds, local_pos)
-            print(f"  --blocked: {len(eval_indices)}/{len(test_ds.indices)} test users are blocked")
+            eval_indices = test_idx[np.array(local_pos)]
+            seed_eval_ds = Subset(seed_ds, local_pos)
+            aug_eval_ds  = Subset(aug_ds,  local_pos)
+            print(f"  --blocked: {len(eval_indices)}/{len(test_idx)} test users are blocked")
 
-        test_loader = DataLoader(
-            eval_ds, batch_size=args.batch_size,
-            shuffle=False, num_workers=2, pin_memory=True,
-        )
+        seed_loader = DataLoader(seed_eval_ds, batch_size=args.batch_size,
+                                 shuffle=False, num_workers=2, pin_memory=True)
+        aug_loader  = DataLoader(aug_eval_ds,  batch_size=args.batch_size,
+                                 shuffle=False, num_workers=2, pin_memory=True)
 
-        # LS refnoise baseline
-        ls_nmse = nmse_db_arrays(ls_arr, ch_arr, eval_indices)
-
-        # seed model on this run's test split (refnoise LS input)
-        seed_nmse = model_nmse_db(seed_model, test_loader, device)
-
-        # aug model on this run's test split (refnoise LS input)
-        aug_nmse  = model_nmse_db(aug_model,  test_loader, device)
+        ls_nmse   = nmse_db_arrays(ls_arr, ch_arr, eval_indices)
+        seed_nmse = model_nmse_db(seed_model, seed_loader, device)
+        aug_nmse  = model_nmse_db(aug_model,  aug_loader,  device)
 
         print(f"  LS refnoise NMSE :  {ls_nmse:+7.2f} dB")
         print(f"  Seed model NMSE  :  {seed_nmse:+7.2f} dB")
@@ -212,7 +255,8 @@ def main():
         return
 
     df = pd.DataFrame(rows).sort_values("run_id")
-    csv_path = os.path.join(args.out_dir, "experiment6.csv")
+    csv_fname = "experiment6_blocked.csv" if args.blocked else "experiment6.csv"
+    csv_path = os.path.join(args.out_dir, csv_fname)
     df.to_csv(csv_path, index=False)
     print(f"\nCSV  → {csv_path}")
 

@@ -42,6 +42,7 @@ def main_train(config, continue_= None):
         "snr":             config["snr"],
         "split_type":      "LS",
         "user_noise":      config["user_noise"],
+        "ls_mode":         config.get("ls_mode", ""),
         "train_nmse":      ls_nmse_train,
         "test_nmse_val":   ls_nmse_val,
         "test_nmse_train": ls_nmse_test,
@@ -129,9 +130,7 @@ def main_train(config, continue_= None):
         "snr": config["snr"],
         "split_type": config["split_type"],
         "user_noise": config["user_noise"],
-        # "train_nmse": 10 * np.log10(train_nmse),
-        # "test_nmse_val": 10 * np.log10(test_nmse_train),
-        # "test_nmse_train": 10 * np.log10(test_nmse_train),
+        "ls_mode": config.get("ls_mode", ""),
         "train_nmse": results["Train Set"]["Best Val"],
         "test_nmse_val": results["Test Set"]["Best Val"],
         "test_nmse_train": results["Test Set"]["Best Train"]
@@ -194,6 +193,8 @@ if __name__ == "__main__":
     parser.add_argument('--seed',                  type=int,   default=42)
     parser.add_argument('--results_csv',           type=str,   default='data/results.csv')
     parser.add_argument('--model_dir',             type=str,   default='models')
+    parser.add_argument('--ls_mode',               type=str,   default='',
+                        help="LS input mode (adaptive/fixed/refnoise) — recorded in results CSV")
     args = parser.parse_args()
 
     if args.user_positions_file is None:
@@ -219,6 +220,7 @@ if __name__ == "__main__":
         'seed':                 args.seed,
         'results_csv':          args.results_csv,
         'model_dir':            args.model_dir,
+        'ls_mode':              args.ls_mode,
     }
 
     model = main_train(config, continue_=args.continue_training)

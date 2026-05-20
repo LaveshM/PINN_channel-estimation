@@ -1,17 +1,30 @@
 #!/usr/bin/env bash
 # scripts/train_aug4.sh
 # ---------------------
-# Experiment 4 — train on augmented data (run_0010, 20 trucks) for all three
+# Train on heavy-blockage augmented data (run_0060, 60 trucks) for all three
 # LS input modes: adaptive, fixed, refnoise.
 #
-# For each mode × split combination a separate model is trained and saved to:
-#   models/aug/{mode}/snr0/{split}_3.0/simple_ls_val.pth
+# PREREQUISITE — generate the heavy-blockage runs first (runs 30/40/50/60/70/80):
+#   docker exec -w /workspace dpinn0 python3 make_augmented_channels.py \
+#       --csv Dataset/15GHz_concatenated_data.csv \
+#       --out-dir data \
+#       --n-runs 10 --step 10 --start-run 3 --end-run 10 \
+#       --dir-trucks \
+#       --atten-min 3 --atten-max 12 \
+#       --ls-modes adaptive fixed refnoise \
+#       --snr-list 0 \
+#       --user-noise 3.0 \
+#       --seed 123 \
+#       --skip-summary
+#
+# For each mode × split a model is saved to:
+#   models/aug5/{mode}/snr0/{split}_3.0/simple_ls_val.pth
 #
 # ── CONFIG — edit these ───────────────────────────────────────────────────────
-GPU_IDS=(0 1 2 3)
+GPU_IDS=(0)
 MAX_JOBS_PER_GPU=2
-AUG_DIR="data/run_0010"
-MODELS_DIR="models/aug"
+AUG_DIR="data/run_0060"
+MODELS_DIR="models/aug5"
 SNR=0
 USER_NOISE=3.0
 EPOCHS=500
@@ -67,7 +80,7 @@ echo ""
 echo "Launching training jobs ..."
 job_index=0
 
-for mode in adaptive fixed refnoise; do
+for mode in adaptive refnoise fixed; do
 for split in "${SPLIT_LIST[@]}"; do
 
     ls_file="${AUG_DIR}/${LS_FILES[$mode]}"
@@ -86,6 +99,7 @@ for split in "${SPLIT_LIST[@]}"; do
         --snr                 "$SNR" \
         --epochs              "$EPOCHS" \
         --model_dir           "$model_subdir" \
+        --ls_mode             "$mode" \
         --results_csv         "${MODELS_DIR}/results_aug4.csv" \
         > "$log" 2>&1 &
 

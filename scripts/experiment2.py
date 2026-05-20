@@ -11,10 +11,10 @@ For each run the model is fed each of the three LS inputs separately:
   refnoise  → ls_snr+0_refnoise.npy
 
 With --blocked-only: also evaluates on the subset of test users that are
-blocked (blocked_mask.npy == True) and generates a separate plot for them.
+blocked (blocked_mask.npy == True) and saves a separate CSV and plot for them.
 
-Results → models/old/eval_results.csv
-Plots   → models/old/eval_results.png  [+ eval_results_blocked.png]
+Results → plots/experiment2.csv
+Plots   → plots/experiment2.png  [+ plots/experiment2_blocked.csv + plots/experiment2_blocked.png]
 
 Usage (from repo root or from scripts/):
     python3 scripts/experiment2.py --model models/snr0/random_3.0/simple_ls_val.pth
@@ -38,7 +38,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from Model import ImprovedPhysicsInformedUNet, create_datasets, set_seed
+from Model import (ImprovedPhysicsInformedUNet, GlobalNormalizedDataset,
+                   evaluate_test_set, set_seed)
 from find_in_map import RSSMapProcessor
 
 # ── constants ─────────────────────────────────────────────────────────────────
@@ -97,15 +98,17 @@ def model_nmse_db(model, loader, device):
     return float(10.0 * np.log10(total_err / total_pow))
 
 
-def blocked_subset(test_ds, blocked_mask):
-    """
-    Return (local_positions, real_indices) for test samples that are blocked.
-    local_positions: indices into test_ds (for Subset)
-    real_indices: indices into the full array (for direct numpy NMSE)
-    """
+# def model_nmse_db(model, loader, device):
+#     """Per-sample average NMSE in dB via evaluate_test_set."""
+#     nmse_linear = evaluate_test_set(model, loader, device)
+#     return float(10.0 * np.log10(nmse_linear))
+
+
+def blocked_subset(test_indices, blocked_mask):
+    """Return (local_positions, real_indices) for blocked test samples."""
     blocked_set = set(np.where(blocked_mask)[0])
-    local = [i for i, ri in enumerate(test_ds.indices) if ri in blocked_set]
-    real  = test_ds.indices[np.array(local)] if local else np.array([], dtype=int)
+    local = [i for i, ri in enumerate(test_indices) if ri in blocked_set]
+    real  = test_indices[np.array(local)] if local else np.array([], dtype=int)
     return local, real
 
 
@@ -146,7 +149,7 @@ def main():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--model",        required=True, help="Path to model checkpoint (.pth)")
     parser.add_argument("--data-dir",     default="data")
-    parser.add_argument("--out-dir",      default="models/old")
+    parser.add_argument("--out-dir",      default="plots")
     parser.add_argument("--device",       default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--blocked-only", action="store_true",
                         help="Also evaluate on blocked users only and save a separate plot")
@@ -169,20 +172,42 @@ def main():
         print(f"No run_XXXX directories found in {args.data_dir}")
         return
 
+    # Compute split indices once — they are deterministic given SEED and n_samples,
+    # which is the same for every run, so there's no need to re-derive them per run.
+    first_ch_path = next(
+        (os.path.join(d, "channels.npy") for d in run_dirs
+         if os.path.exists(os.path.join(d, "channels.npy"))), None
+    )
+    if first_ch_path is None:
+        print("No channels.npy found in any run directory.")
+        return
+    n_samples = np.load(first_ch_path).shape[0]
+    set_seed(SEED)
+    perm      = np.random.permutation(n_samples)
+    n_train   = int(n_samples * 0.8)
+    n_val     = int(n_samples * 0.1)
+    train_idx = perm[:n_train]
+    test_idx  = perm[n_train + n_val:]
+    print(f"Split (seed={SEED}): {len(train_idx)} train / {len(test_idx)} test  (n={n_samples})\n")
+
     rows = []
 
     for run_dir in run_dirs:
-        run_id   = int(os.path.basename(run_dir).split("_")[1])
-        ch_path  = os.path.join(run_dir, "channels.npy")
-        pos_path = os.path.join(run_dir, "locations_noisy.txt")
-        mask_path= os.path.join(run_dir, "blocked_mask.npy")
+        run_id    = int(os.path.basename(run_dir).split("_")[1])
+        ch_path   = os.path.join(run_dir, "channels.npy")
+        pos_path  = os.path.join(run_dir, "locations_noisy.txt")
+        mask_path = os.path.join(run_dir, "blocked_mask.npy")
 
         if not os.path.exists(ch_path) or not os.path.exists(pos_path):
             print(f"[run {run_id:04d}] SKIP — channels.npy or locations_noisy.txt missing")
             continue
 
-        ch           = np.load(ch_path,   mmap_mode="r")
+        ch           = np.load(ch_path)
         blocked_mask = np.load(mask_path) if os.path.exists(mask_path) else None
+
+        # accurate_max is the same for all LS modes in this run
+        accurate_max = float(np.max(np.abs(ch[train_idx])))
+
         print(f"[run {run_id:04d}] {'─'*52}")
 
         for mode, ls_fname in LS_MODES.items():
@@ -191,45 +216,50 @@ def main():
                 print(f"  {mode:10s} SKIP — {ls_fname} missing")
                 continue
 
-            set_seed(SEED)
-            train_ds, _, test_ds, _, _, _ = create_datasets(
+            ls = np.load(ls_path, mmap_mode="r")
+
+            # Normalization from training indices (same logic as create_datasets)
+            smomp_max  = float(np.max(np.abs(ls[train_idx])))
+            global_max = max(smomp_max, accurate_max)
+            norm_params = {"smomp_max": smomp_max,
+                           "accurate_max": accurate_max,
+                           "global_max": global_max}
+
+            test_ds = GlobalNormalizedDataset(
                 smomp_file=ls_path,
                 accurate_file=ch_path,
                 user_positions_file=pos_path,
-                split_type=SPLIT_TYPE,
-                user_noise=USER_NOISE,
                 rss_processor=rss_processor,
+                normalization_params=norm_params,
+                indices=test_idx,
+                user_noise=USER_NOISE,
+                split="test",
             )
 
-            ls    = np.load(ls_path, mmap_mode="r")
-            ls_tr = nmse_db(ls, ch, train_ds.indices)
-            ls_te = nmse_db(ls, ch, test_ds.indices)
+            ls_tr = nmse_db(ls, ch, train_idx)
+            ls_te = nmse_db(ls, ch, test_idx)
 
-            train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE,
-                                      shuffle=False, num_workers=2, pin_memory=True)
-            test_loader  = DataLoader(test_ds,  batch_size=BATCH_SIZE,
-                                      shuffle=False, num_workers=2, pin_memory=True)
-
-            mdl_tr = model_nmse_db(model, train_loader, device)
-            mdl_te = model_nmse_db(model, test_loader,  device)
+            test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE,
+                                     shuffle=False, num_workers=2, pin_memory=True)
+            mdl_te = model_nmse_db(model, test_loader, device)
 
             row = {
                 "run_id":           run_id,
                 "ls_mode":          mode,
                 "ls_nmse_train":    round(ls_tr,  4),
                 "ls_nmse_test":     round(ls_te,  4),
-                "model_nmse_train": round(mdl_tr, 4),
+                "model_nmse_train": float("nan"),
                 "model_nmse_test":  round(mdl_te, 4),
                 "ls_nmse_blocked":      None,
                 "model_nmse_blocked":   None,
             }
 
             print(f"  {mode:10s}  LS  train:{ls_tr:+6.2f} dB  test:{ls_te:+6.2f} dB  |"
-                  f"  model  train:{mdl_tr:+6.2f} dB  test:{mdl_te:+6.2f} dB", end="")
+                  f"  model  test:{mdl_te:+6.2f} dB", end="")
 
             # ── blocked-only subset ───────────────────────────────────────────
             if args.blocked_only and blocked_mask is not None:
-                local_pos, real_idx = blocked_subset(test_ds, blocked_mask)
+                local_pos, real_idx = blocked_subset(test_idx, blocked_mask)
                 if len(local_pos) > 0:
                     ls_bl  = nmse_db(ls, ch, real_idx)
                     bl_loader = DataLoader(
@@ -254,15 +284,19 @@ def main():
 
     df = pd.DataFrame(rows)
 
-    csv_path = os.path.join(args.out_dir, "eval_results.csv")
+    csv_path = os.path.join(args.out_dir, "experiment2.csv")
     df.to_csv(csv_path, index=False)
     print(f"\nCSV     → {csv_path}")
 
-    save_plot(df, os.path.join(args.out_dir, "eval_results.png"),
+    save_plot(df, os.path.join(args.out_dir, "seeddata.png"),
               title="Experiment 2 — model vs LS baselines across blockage runs (all test users)")
 
     if args.blocked_only and df["ls_nmse_blocked"].notna().any():
-        save_plot(df, os.path.join(args.out_dir, "eval_results_blocked.png"),
+        blocked_df = df[df["ls_nmse_blocked"].notna()].copy()
+        blocked_csv_path = os.path.join(args.out_dir, "experiment2_blocked.csv")
+        blocked_df.to_csv(blocked_csv_path, index=False)
+        print(f"CSV     → {blocked_csv_path}")
+        save_plot(df, os.path.join(args.out_dir, "experiment2_blocked.png"),
                   title="Experiment 2 — model vs LS baselines across blockage runs (blocked users only)",
                   ls_col="ls_nmse_blocked", model_col="model_nmse_blocked")
 
