@@ -182,17 +182,166 @@ def _place_truck(anchor_xy, bs_xy, bbox_half, truck_length, truck_width, rng):
                  width=truck_width, length=truck_length)
 
 
+def _estimate_local_heading_deg(anchor_xy, valid_xy, k_neighbors=40):
+    """Estimate local road tangent heading (deg) from nearby UE points via PCA."""
+    n = len(valid_xy)
+    if n < 2:
+        return 0.0
+    k = int(max(2, min(k_neighbors, n)))
+    d2 = np.sum((valid_xy - anchor_xy) ** 2, axis=1)
+    idx = np.argpartition(d2, k - 1)[:k]
+    neigh = valid_xy[idx]
+    centered = neigh - np.mean(neigh, axis=0, keepdims=True)
+    cov = centered.T @ centered
+    vals, vecs = np.linalg.eigh(cov)
+    tangent = vecs[:, int(np.argmax(vals))]
+    return float(np.degrees(np.arctan2(tangent[1], tangent[0])))
+
+
+def _project_polygon(points, axis):
+    dots = points @ axis
+    return float(np.min(dots)), float(np.max(dots))
+
+
+def _polygons_overlap_sat(poly_a, poly_b):
+    """2D convex polygon overlap using SAT (returns True for touch/overlap)."""
+    for poly in (poly_a, poly_b):
+        for i in range(len(poly)):
+            p0 = poly[i]
+            p1 = poly[(i + 1) % len(poly)]
+            edge = p1 - p0
+            nrm = np.array([-edge[1], edge[0]], dtype=float)
+            nn = np.linalg.norm(nrm)
+            if nn < 1e-12:
+                continue
+            axis = nrm / nn
+            a0, a1 = _project_polygon(poly_a, axis)
+            b0, b1 = _project_polygon(poly_b, axis)
+            if a1 < b0 or b1 < a0:
+                return False
+    return True
+
+
+def _trucks_overlap(t1, t2, min_gap=0.0):
+    """True if two truck footprints overlap (with optional clearance margin)."""
+    if min_gap > 0:
+        w1 = t1.w + 2.0 * min_gap
+        l1 = t1.l + 2.0 * min_gap
+        w2 = t2.w + 2.0 * min_gap
+        l2 = t2.l + 2.0 * min_gap
+        a = Truck(t1.cx, t1.cy, t1.heading, width=w1, length=l1, height=t1.h)
+        b = Truck(t2.cx, t2.cy, t2.heading, width=w2, length=l2, height=t2.h)
+        c1 = _truck_corners(a)
+        c2 = _truck_corners(b)
+    else:
+        c1 = _truck_corners(t1)
+        c2 = _truck_corners(t2)
+    return _polygons_overlap_sat(c1, c2)
+
+
 def _place_all_trucks(n_total, valid_xy, bs_xy, truck_length, truck_width,
-                      truck_height, bbox_half, rng):
+                      truck_height, bbox_half, rng,
+                      placement_mode="bs_perp", road_half_width=0.0,
+                      min_gap=0.0, max_tries_per_truck=500, heading_mode="tangent",
+                      max_overlap_trucks=0):
     """Pre-generate n_total trucks sequentially from rng."""
     trucks = []
     n_valid = len(valid_xy)
-    for _ in range(n_total):
-        anchor_xy = valid_xy[int(rng.integers(0, n_valid))]
-        t = _place_truck(anchor_xy, bs_xy, bbox_half, truck_length, truck_width, rng)
-        t.h = truck_height
-        t.box_max[2] = truck_height
-        trucks.append(t)
+    if n_valid == 0:
+        return trucks
+
+    if placement_mode == "road" and max_overlap_trucks == 0:
+        available = np.ones(n_valid, dtype=bool)
+        # Conservative center-distance exclusion radius to prevent OBB overlap.
+        circ_radius = 0.5 * float(np.hypot(truck_length, truck_width)) + float(min_gap)
+        excl_radius = 2.0 * circ_radius + 2.0 * float(max(0.0, road_half_width))
+        excl_r2 = excl_radius * excl_radius
+
+        for _ in range(n_total):
+            avail_idx = np.flatnonzero(available)
+            if len(avail_idx) == 0:
+                print(f"WARNING: no available road anchors left; placed {len(trucks)}/{n_total}")
+                break
+
+            pick = int(avail_idx[int(rng.integers(0, len(avail_idx)))])
+            anchor_xy = valid_xy[pick]
+
+            center = np.array(anchor_xy, dtype=float)
+            heading_deg = _estimate_local_heading_deg(anchor_xy, valid_xy)
+
+            if road_half_width > 0:
+                tangent = np.array([np.cos(np.deg2rad(heading_deg)), np.sin(np.deg2rad(heading_deg))])
+                normal = np.array([-tangent[1], tangent[0]])
+                lateral = float(rng.uniform(-road_half_width, road_half_width))
+                center = center + lateral * normal
+
+            if heading_mode == "bs_perp":
+                bs_vec = bs_xy - center
+                bs_norm = np.linalg.norm(bs_vec)
+                if bs_norm < 1e-6:
+                    heading_deg = float(rng.uniform(0.0, 360.0))
+                else:
+                    bs_dir = bs_vec / bs_norm
+                    perp_dir = np.array([-bs_dir[1], bs_dir[0]])
+                    heading_deg = float(np.degrees(np.arctan2(perp_dir[1], perp_dir[0])))
+
+            t = Truck(center_x=float(center[0]), center_y=float(center[1]),
+                      heading_deg=heading_deg,
+                      width=truck_width, length=truck_length, height=truck_height)
+            trucks.append(t)
+
+            # Remove nearby anchors (+ buffer), ensuring future trucks cannot overlap.
+            d2 = np.sum((valid_xy - center[np.newaxis, :]) ** 2, axis=1)
+            available[d2 <= excl_r2] = False
+    else:
+        overlap_degree = []
+        for _ in range(n_total):
+            placed = False
+            for _try in range(max_tries_per_truck):
+                anchor_xy = valid_xy[int(rng.integers(0, n_valid))]
+                if placement_mode == "road":
+                    center = np.array(anchor_xy, dtype=float)
+                    heading_deg = _estimate_local_heading_deg(anchor_xy, valid_xy)
+                    if road_half_width > 0:
+                        tangent = np.array([np.cos(np.deg2rad(heading_deg)), np.sin(np.deg2rad(heading_deg))])
+                        normal = np.array([-tangent[1], tangent[0]])
+                        lateral = float(rng.uniform(-road_half_width, road_half_width))
+                        center = center + lateral * normal
+                    if heading_mode == "bs_perp":
+                        bs_vec = bs_xy - center
+                        bs_norm = np.linalg.norm(bs_vec)
+                        if bs_norm < 1e-6:
+                            heading_deg = float(rng.uniform(0.0, 360.0))
+                        else:
+                            bs_dir = bs_vec / bs_norm
+                            perp_dir = np.array([-bs_dir[1], bs_dir[0]])
+                            heading_deg = float(np.degrees(np.arctan2(perp_dir[1], perp_dir[0])))
+                    t = Truck(center_x=float(center[0]), center_y=float(center[1]),
+                              heading_deg=heading_deg,
+                              width=truck_width, length=truck_length, height=truck_height)
+                else:
+                    t = _place_truck(anchor_xy, bs_xy, bbox_half, truck_length, truck_width, rng)
+                    t.h = truck_height
+                    t.box_max[2] = truck_height
+
+                overlap_idx = [i for i, ex in enumerate(trucks)
+                               if _trucks_overlap(t, ex, min_gap=min_gap)]
+                # max_overlap_trucks=0 -> no overlaps allowed.
+                # max_overlap_trucks=1 -> one pair overlap allowed (no triple stacking).
+                if len(overlap_idx) > max_overlap_trucks:
+                    continue
+                if any(overlap_degree[i] >= max_overlap_trucks for i in overlap_idx):
+                    continue
+
+                trucks.append(t)
+                overlap_degree.append(len(overlap_idx))
+                for i in overlap_idx:
+                    overlap_degree[i] += 1
+                placed = True
+                break
+            if not placed:
+                print(f"WARNING: could not place all trucks without overlap; placed {len(trucks)}/{n_total}")
+                break
     return trucks
 
 
@@ -434,6 +583,23 @@ def _run_one(run_id, n_trucks, df, xyz_all, valid_indices,
         print(f"  centres: {centres}", end="")
     print()
 
+    if getattr(cfg, "plots_only", False):
+        df_mod, pg_loss_db = _apply_blockage(
+            df, valid_indices, trucks, losses_db,
+            cfg.bw, cfg.n_tap, parsed_paths, parsed_pg, parsed_toa,
+            hard_block=hard_block,
+        )
+        _ = df_mod  # parsed for consistency; not used further in plot-only mode
+        blocked_mask = pg_loss_db > 0.0
+        tensor_loss_db = pg_loss_db
+        with open(os.path.join(run_dir, "truck_params.json"), "w") as fh:
+            json.dump({"bs_xy": bs_xy.tolist(),
+                       "trucks": [t.to_dict() for t in trucks]}, fh, indent=2)
+        _save_plot(run_id, n_trucks, trucks, valid_xyz[:, :2],
+                   blocked_mask, tensor_loss_db, bs_xy, plot_path)
+        print(f"  [run {run_id:04d}]  plot-only done → {plot_path}")
+        return []
+
     ch_path   = os.path.join(run_dir, "channels.npy")
     mask_path = os.path.join(run_dir, "blocked_mask.npy")
 
@@ -627,6 +793,18 @@ def _parse_args():
     p.add_argument("--truck-length", type=float, default=12.0)
     p.add_argument("--truck-height", type=float, default=4.0)
     p.add_argument("--bbox-half",    type=float, default=2.5)
+    p.add_argument("--placement-mode", choices=["bs_perp", "road"], default="road",
+                   help="Truck placement strategy: bs_perp (legacy) or road-constrained.")
+    p.add_argument("--heading-mode", choices=["tangent", "bs_perp"], default="tangent",
+                   help="Heading strategy for road mode.")
+    p.add_argument("--road-half-width", type=float, default=0.0,
+                   help="Optional lateral jitter (m) around sampled road center points.")
+    p.add_argument("--min-truck-gap", type=float, default=0.5,
+                   help="Minimum clearance (m) between truck footprints.")
+    p.add_argument("--max-place-tries", type=int, default=500,
+                   help="Max placement attempts per truck before giving up.")
+    p.add_argument("--max-overlap-trucks", type=int, default=0,
+                   help="Allowed number of overlaps per truck footprint: 0=no overlap, 1=allow pair overlap.")
     # attenuation
     p.add_argument("--atten-min",  type=float, default=2.0)
     p.add_argument("--atten-max",  type=float, default=10.0)
@@ -651,6 +829,8 @@ def _parse_args():
                         "run index.  E.g. --step 10 --start-run 3 --end-run 10 writes "
                         "run_0030/run_0040/.../run_0100 with 30/40/.../100 trucks. "
                         "Overrides --run-id-offset.")
+    p.add_argument("--plots-only", action="store_true",
+                   help="Fast mode: only generate blocker layout plots; skip channel/LS files.")
     return p.parse_args()
 
 
@@ -696,34 +876,39 @@ def main():
     valid_indices = _find_valid_indices(df)
     print(f"  {len(valid_indices)} / {n_users} rows valid")
 
-    # ── unblocked reference tensor — load from run_0000 if it exists ──────────
-    run0_ch = os.path.join(args.out_dir, "run_0000", "channels.npy")
-    if os.path.exists(run0_ch):
-        print(f"\nLoading unblocked reference from {run0_ch} ...")
-        ch_unblocked = _to_complex(np.load(run0_ch))
+    if args.plots_only:
+        ch_unblocked = None
+        snr_info = {}
+        print("\nplots-only mode: skipping channel tensor + LS noise references")
     else:
-        print("\nBuilding unblocked reference channel tensor (run_0000 not yet generated) ...")
-        df_orig      = df.iloc[valid_indices].reset_index(drop=True)
-        ch_unblocked = build_channel_tensor(
-            df_orig,
-            N_tx_x=args.n_tx_x, N_tx_y=args.n_tx_y,
-            N_rx_x=args.n_rx_x, N_rx_y=args.n_rx_y,
-            N_tap=args.n_tap, Bw=args.bw, Pt=args.pt,
-        )
-    print(f"  unblocked tensor: {ch_unblocked.shape}")
+        # ── unblocked reference tensor — load from run_0000 if it exists ──────
+        run0_ch = os.path.join(args.out_dir, "run_0000", "channels.npy")
+        if os.path.exists(run0_ch):
+            print(f"\nLoading unblocked reference from {run0_ch} ...")
+            ch_unblocked = _to_complex(np.load(run0_ch))
+        else:
+            print("\nBuilding unblocked reference channel tensor (run_0000 not yet generated) ...")
+            df_orig      = df.iloc[valid_indices].reset_index(drop=True)
+            ch_unblocked = build_channel_tensor(
+                df_orig,
+                N_tx_x=args.n_tx_x, N_tx_y=args.n_tx_y,
+                N_rx_x=args.n_rx_x, N_rx_y=args.n_rx_y,
+                N_tap=args.n_tap, Bw=args.bw, Pt=args.pt,
+            )
+        print(f"  unblocked tensor: {ch_unblocked.shape}")
 
-    # ── noise references per SNR (for fixed / refnoise LS modes) ──────────────
-    ch_ub_pow = np.abs(ch_unblocked) ** 2
-    snr_info  = {}
-    print(f"\nNoise references ({len(args.snr_list)} SNR value(s)):")
-    for snr in args.snr_list:
-        snr_int = int(snr)
-        snr_tag = f"+{snr_int}" if snr_int >= 0 else str(snr_int)
-        snr_lin = 10 ** (snr / 10.0)
-        fixed_s = float(np.mean(ch_ub_pow)) / snr_lin
-        ref_arr = np.mean(ch_ub_pow, axis=(1, 2, 3)) / snr_lin
-        snr_info[snr] = (snr_tag, fixed_s, ref_arr)
-        print(f"  SNR={snr:+.0f} dB  fixed_scalar={fixed_s:.3e}  ref_mean={ref_arr.mean():.3e}")
+        # ── noise references per SNR (for fixed / refnoise LS modes) ──────────
+        ch_ub_pow = np.abs(ch_unblocked) ** 2
+        snr_info  = {}
+        print(f"\nNoise references ({len(args.snr_list)} SNR value(s)):")
+        for snr in args.snr_list:
+            snr_int = int(snr)
+            snr_tag = f"+{snr_int}" if snr_int >= 0 else str(snr_int)
+            snr_lin = 10 ** (snr / 10.0)
+            fixed_s = float(np.mean(ch_ub_pow)) / snr_lin
+            ref_arr = np.mean(ch_ub_pow, axis=(1, 2, 3)) / snr_lin
+            snr_info[snr] = (snr_tag, fixed_s, ref_arr)
+            print(f"  SNR={snr:+.0f} dB  fixed_scalar={fixed_s:.3e}  ref_mean={ref_arr.mean():.3e}")
 
     # ── pre-generate all trucks + attenuation matrix ───────────────────────────
     master_rng = np.random.default_rng(args.seed)
@@ -738,6 +923,12 @@ def main():
         total_trucks, xy_all[valid_indices], bs_xy,
         args.truck_length, args.truck_width, args.truck_height,
         args.bbox_half, truck_rng,
+        placement_mode=args.placement_mode,
+        road_half_width=args.road_half_width,
+        min_gap=args.min_truck_gap,
+        max_tries_per_truck=args.max_place_tries,
+        heading_mode=args.heading_mode,
+        max_overlap_trucks=args.max_overlap_trucks,
     )
 
     print(f"Pre-generating attenuation matrix ({n_valid} × {total_trucks}) ...")
