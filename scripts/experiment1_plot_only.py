@@ -144,7 +144,7 @@ def stage_plot(args):
         w = 0.35
         box_color = "#4DAC26"
 
-        fig, ax = plt.subplots(figsize=(6.4, 4.2))
+        fig, ax = plt.subplots(figsize=(6.4, 2.8))
         bp = ax.boxplot(
             delta_boxes, positions=x, widths=w,
             patch_artist=True, showfliers=True,
