@@ -1,3 +1,0 @@
-snr,split_type,user_noise,ls_mode,train_nmse,test_nmse_val,test_nmse_train
-0.0,LS,3.0,refnoise,4.9650118057265455,4.788207040453985,4.9538830040589525
-0.0,LS,3.0,adaptive,4.596953309179754,4.585025479015127,4.591414189957689
