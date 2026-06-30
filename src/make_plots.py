@@ -29,6 +29,16 @@ SPLIT_SEED     = 42
 TRAIN_RATIO    = 0.8
 TRUCKS_PER_RUN = 5
 
+plt.rcParams.update({
+    "font.family": "DejaVu Sans",
+    "font.size": 9,
+    "axes.titlesize": 10,
+    "axes.labelsize": 9,
+    "legend.fontsize": 9,
+    "figure.dpi": 150,
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
+})
 
 def seed_split(data_dir, seed):
     run0    = os.path.join(data_dir, "run_0000")
@@ -135,7 +145,7 @@ def main():
     ax.set_xticks(x)
     ax.set_xticklabels([str(v) for v in truck_vals], fontsize=9)
     ax.set_xlabel("Number of blockers", fontsize=11)
-    ax.set_ylabel("Per-user Δ NMSE (dB)", fontsize=11)
+    ax.set_ylabel("Per-user $\Delta$ NMSE (dB)", fontsize=11)
     ax.set_title(
         "NMSE degradation of channel estimation model\n"
         "in the presence of dynamic blockers",
@@ -143,13 +153,56 @@ def main():
     ax.grid(True, axis="y", alpha=0.3)
     fig.tight_layout()
 
-    out_png = os.path.join(args.out_dir, "experiment1_snr+0.png")
-    out_pdf = os.path.join(args.out_dir, "experiment1_snr+0.pdf")
+    out_png = os.path.join(args.out_dir, "pinn_seed_model_aug_test.png")
+    out_pdf = os.path.join(args.out_dir, "pinn_seed_model_aug_test.pdf")
     fig.savefig(out_png, dpi=150)
     fig.savefig(out_pdf)
     plt.close(fig)
     print(f"Plot → {out_png}")
     print(f"Plot → {out_pdf}")
+
+    # --- plot 2: per-user (PINN NMSE - LS NMSE) across blocker counts ---
+    all_truck_vals  = sorted(records.keys())   # includes 0
+    vs_ls_boxes = []
+    for n_trucks in all_truck_vals:
+        df = records[n_trucks]
+        delta = (df["seed_nmse_db"] - df["ls_nmse_db"]).values
+        vs_ls_boxes.append(delta)
+
+    x2  = np.arange(len(all_truck_vals))
+    fig2, ax2 = plt.subplots(figsize=(6.4, 2.8))
+    bp2 = ax2.boxplot(
+        vs_ls_boxes, positions=x2, widths=w,
+        patch_artist=True, showfliers=True,
+        flierprops=dict(marker=".", markersize=2, alpha=0.25,
+                        markerfacecolor="gray", markeredgecolor="gray"),
+        medianprops=dict(color="black", linewidth=2),
+        whiskerprops=dict(color="gray", linewidth=1.0),
+        capprops=dict(color="gray", linewidth=1.0),
+    )
+    for patch in bp2["boxes"]:
+        patch.set_facecolor("#4DAC26")
+        patch.set_alpha(0.75)
+
+    ax2.axhline(0, color="black", linewidth=1.0, linestyle="--", alpha=0.7)
+    ax2.set_xticks(x2)
+    ax2.set_xticklabels([str(v) for v in all_truck_vals], fontsize=9)
+    ax2.set_xlabel("Number of blockers", fontsize=11)
+    ax2.set_ylabel("Per-user PINN NMSE - LS NMSE (dB)", fontsize=11)
+    ax2.set_title(
+        "Per-user PINN model vs LS NMSE difference\n"
+        "across dynamic blocker conditions",
+        fontsize=10)
+    ax2.grid(True, axis="y", alpha=0.3)
+    fig2.tight_layout()
+
+    out_pdf2 = os.path.join(args.out_dir, "pinn_model_vs_ls_per_user.pdf")
+    out_png2 = os.path.join(args.out_dir, "pinn_model_vs_ls_per_user.png")
+    fig2.savefig(out_png2, dpi=150)
+    fig2.savefig(out_pdf2)
+    plt.close(fig2)
+    print(f"Plot → {out_png2}")
+    print(f"Plot → {out_pdf2}")
 
     # summary CSV
     rows = []
