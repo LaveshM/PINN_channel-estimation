@@ -1,11 +1,38 @@
 # Physics-Informed Neural Networks for Wireless Channel Estimation
 
-This is a fork of the official implementation of **"Physics-Informed Neural Networks for Wireless Channel Estimation with Limited Pilot Signals"**, Alireza Javid and Nuria González-Prelcic (UC San Diego), NeurIPS 2025 Workshop *AI and ML for Next-Generation Wireless Communications and Networking (AI4NextG)*.
+This directory contains the PINN channel-estimation case study from:
 
-- Paper (OpenReview): <https://openreview.net/pdf?id=r3plaU6DvW>
-- Original repository: <https://github.com/AlirezaJav/PINN_channel-estimation>
+> Lavesh Mangal, Fraida Fund, and Shivendra Panwar. 2026. *Mind the
+> Generalization Gap: Lessons from Reproducing Research on Machine Learning
+> for Wireless Networks.* In ACM SIGCOMM Workshop on Negative Results in
+> Network Measurements (NetNeg '26), August 17-21, 2026, Denver, CO, USA.
+> ACM, New York, NY, USA, 6 pages.
 
-This fork restructures the repo for reproducibility and adds a dynamic blockage augmentation pipeline to evaluate model robustness under varying levels of NLOSv blockage.
+Paper DOI: <https://doi.org/10.1145/3789240.3828835>
+
+## Original paper
+
+The original study is:
+
+> Alireza Javid and Nuria Gonzalez Prelcic. 2025. *Physics-Informed Neural
+> Networks for Wireless Channel Estimation with Limited Pilot Signals.* In
+> NeurIPS 2025 Workshop: AI and ML for Next-Generation Wireless
+> Communications and Networking.
+
+The author implementation is available at
+<https://github.com/AlirezaJav/PINN_channel-estimation>, and the paper is
+available on [OpenReview](https://openreview.net/pdf?id=r3plaU6DvW).
+
+## Provenance
+
+We use the authors' released implementation and ray-traced channel data,
+including the RSS maps and multipath-component outputs. The released data
+does not include a trained model used by this case study. Our original work
+adds the reproducibility layout, dynamic-blockage augmentation, augmented
+training and evaluation pipeline, per-user analysis, and plots in this
+directory. The augmentation emulates deployment-time blockers by
+post-processing the released ray-tracing outputs; it does not rerun the
+commercial Wireless InSite simulator.
 
 
 ## Repository structure
@@ -123,3 +150,15 @@ bash scripts/3_evaluate.sh
 bash scripts/4_plot.sh
 ```
 
+## Findings
+
+Using the original static dataset and evaluation setup, we reproduce the
+paper's aggregate result that the PINN improves on the least-squares channel
+estimate. That metric can hide uneven per-user outcomes: the PINN is worse
+than least squares for many users, especially under dynamic blockage.
+
+The static train-test setup does not represent deployment. It randomly
+partitions snapshots from one ray-traced environment, while deployment can
+include moving blockers and other environmental changes. When we emulate
+dynamic blockers in the released data, performance degrades substantially.
+Fine-tuning on the augmented data does not recover the original result.
